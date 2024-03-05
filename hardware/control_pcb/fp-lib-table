@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "Local")(type "KiCad")(uri "W:/hardware/Libraries/footprints/Local.pretty")(options "")(descr ""))
+)

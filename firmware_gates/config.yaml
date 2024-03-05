@@ -1,0 +1,677 @@
+esphome:
+  name: gateway-control
+  comment: Gateway Control
+  project:
+    name: "vks.control_gateway"
+    version: "1.0"
+
+esp32:
+  board: esp32dev
+
+logger:
+
+globals:
+  - id: max_keys
+    type: int
+    restore_value: false
+    initial_value: '8'
+  - id: stored_keys
+    type: int[8]
+    restore_value: true
+    initial_value: '{-1,-1,-1,-1,-1,-1,-1,-1}'
+  - id: last_access_time
+    type: int[8]
+    restore_value: true
+    initial_value: '{-1,-1,-1,-1,-1,-1,-1,-1}'
+  - id: last_access_date
+    type: int[8]
+    restore_value: true
+    initial_value: '{-1,-1,-1,-1,-1,-1,-1,-1}'
+  - id: key_read
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: service_mode
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: current_key
+    type: uint64_t
+    restore_value: false
+    initial_value: '-1'
+  - id: last_used_card
+    type: int
+    restore_value: true
+    initial_value: '-1'
+  - id: last_access
+    type: std::string
+    restore_value: true
+    initial_value: '""'
+    max_restore_data_length: 32
+
+
+api:
+  encryption:
+    key: !secret enc_key
+  reboot_timeout: 30s
+
+mqtt:
+  id: mqtt_service
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_usr
+  password: !secret mqtt_pwd
+  discovery: false
+  topic_prefix: !secret mqtt_prefix
+  keepalive: 5s
+
+ota:
+  password: !secret ota_password
+
+wifi:
+  networks:
+    - ssid: !secret wifi_name
+      password: !secret wifi_pwd
+    - ssid: !secret wifi_name_bak
+      password: !secret wifi_pwd_bak
+  power_save_mode: none
+  ap:
+    ssid: "VKS_GC"
+    password: !secret wifi_pwd_ap
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: ntp_time
+
+output:
+  - platform: gpio
+    id: gate_full
+    pin: GPIO4
+  - platform: gpio
+    id: gate_ped
+    pin: GPIO16
+  - platform: gpio
+    id: lt_parking
+    pin: GPIO25
+  - platform: gpio
+    id: lt_front_yard
+    pin: GPIO26
+  - platform: gpio
+    id: lt_bollards
+    pin: GPIO27
+  - platform: gpio
+    id: lt_address
+    pin: GPIO14
+  - platform: gpio
+    id: lt_fence
+    pin: GPIO12
+  - platform: gpio
+    id: led_rfid_green
+    pin: 
+      number: GPIO22
+      mode: 
+        pulldown: true
+        output: true
+  - platform: gpio
+    id: led_rfid_red
+    pin: 
+      number: GPIO23
+      mode: 
+        pulldown: true
+        output: true
+
+binary_sensor:
+  - platform: gpio
+    id: card_add
+    pin: GPIO19
+    name: "Add Card"
+    device_class: ""
+    internal: true
+    on_click:
+      min_length: 1s
+      max_length: 5s
+      then:
+        - script.execute:
+            id: key_add
+  - platform: gpio
+    id: card_remove
+    pin: GPIO18
+    name: "Remove [All] Card[-s]"
+    internal: true
+    device_class: ""
+    on_click:
+      - min_length: 1s
+        max_length: 5s
+        then:
+          - script.execute:
+              id: key_remove
+      - min_length: 5s
+        max_length: 10s
+        then:
+          - script.execute:
+              id: key_clear    
+  - platform: gpio
+    pin: GPIO13
+    name: "Main Gate"
+    device_class: door
+    icon: mdi:gate
+
+wiegand:
+  - id: rfid_panel
+    d0: GPIO17
+    d1: GPIO5
+    on_raw:
+      then:
+        - lambda: |-
+            auto check_eparity = [] (uint64_t value, int start, int length) {
+              int parity = 0;
+              uint64_t mask = 1LL << start;
+              for (int i = 0; i < length; i++, mask <<= 1) {
+                if (value & mask)
+                  parity++;
+              }
+              return !(parity & 1);
+            };
+
+            auto check_oparity = [] (uint64_t value, int start, int length) {
+              int parity = 0;
+              uint64_t mask = 1LL << start;
+              for (int i = 0; i < length; i++, mask <<= 1) {
+                if (value & mask)
+                  parity++;
+              }
+              return parity & 1;
+            };
+
+            if(id(key_read))
+            {
+              ESP_LOGW("KEYS", "Key has been already read. Please wait for clean up.");
+              return;
+            }
+
+            if(bits != 26)
+            {
+              ESP_LOGW("KEYS", "Unsupported key (%d bits) has been read: %llx", bits, value);
+              id(key_read) = false;
+              id(current_key) = -1;
+              return;
+            };
+
+            if (!check_eparity(value, 13, 13) || !check_oparity(value, 0, 13)) {
+              ESP_LOGW("KEYS", "Invalid parity for key: %llx", value);
+              id(key_read) = false;
+              id(current_key) = -1;
+              return;
+            }
+
+            id(current_key) = (value >> 1) & 0xffffff;
+
+            ESP_LOGI("RFID", "Tag has been read: %llx", id(current_key));
+
+            id(key_read) = true;
+
+sensor:
+  - platform: internal_temperature
+    name: "ESP32 Internal Temperature"
+    entity_category: "diagnostic"
+    update_interval: 5s
+  - platform: wifi_signal
+    name: "WiFi Signal Strength"
+    update_interval: 60s
+    entity_category: "diagnostic"
+    unit_of_measurement: "%"
+    filters:
+      - lambda: return min(max(2 * (x + 100.0), 0.0), 100.0);
+
+button:
+  - platform: template
+    name: "Open Full"
+    id: btn_gates_full
+    icon: mdi:gate
+    on_press:
+      then:
+        - output.turn_on: gate_full
+        - delay: 0.5s
+        - output.turn_off: gate_full
+  - platform: template
+    name: "Open Door"
+    id: btn_gates_pedestrian
+    icon: mdi:door
+    on_press:
+      then:
+        - output.turn_on: gate_ped
+        - delay: 0.5s
+        - output.turn_off: gate_ped
+
+light:
+  - platform: binary
+    output: lt_front_yard
+    name: "Outdoor Front Yard"
+    icon: mdi:light-flood-down
+    id: light_front_yard
+  - platform: binary
+    output: lt_parking
+    name: "Parking"
+    icon: mdi:light-flood-down
+    id: light_parking
+  - platform: binary
+    output: lt_address
+    name: "Address Lights"
+    icon: mdi:numeric-2-box-multiple-outline
+    id: light_address
+  - platform: binary
+    output: lt_fence
+    name: "Fence Lights"
+    icon: mdi:coach-lamp-variant
+    id: light_fence
+  - platform: binary
+    output: lt_bollards
+    name: "Bollards Lights"
+    icon: mdi:post-lamp
+    id: light_bollards
+  - platform: binary
+    output: led_rfid_green
+    id: led_green
+    effects:
+      - strobe:
+          name: slow_blink
+          colors:
+            - state: True
+              duration: 500ms
+            - state: True
+              duration: 500ms
+  - platform: binary
+    output: led_rfid_red
+    id: led_red
+    effects:
+      - strobe:
+          name: slow_blink
+          colors:
+            - state: True
+              duration: 500ms
+            - state: True
+              duration: 500ms
+
+interval:
+  - interval: 0.5s
+    then:
+      - if:
+          condition:
+            - lambda: return !id(service_mode);
+          then:
+            - script.execute: key_check
+
+text_sensor:
+  - platform: template
+    name: "Last Granted Card Id"
+    icon: mdi:credit-card-lock-outline
+    entity_category: "diagnostic"
+    update_interval: 1s
+    lambda: |-
+      if(id(last_used_card) == -1)
+        return {};
+      else
+      {
+        char buf[12];
+        snprintf(buf, sizeof(buf), "%#10.8x", id(last_used_card));
+        return { buf };
+      };
+  - platform: template
+    name: "Last Granted Access Time"
+    icon: mdi:credit-card-clock-outline
+    entity_category: "diagnostic"
+    update_interval: 1s
+    lambda: |-
+      if(id(last_used_card) == -1)
+        return {};
+      else
+        return id(last_access);
+  - platform: template
+    name: "Stored keys"
+    icon: mdi:key-chain
+    id: stored_keys_table
+    entity_category: "diagnostic"
+    update_interval: 30s
+    lambda: |-
+      int key, date, time, year, month, day, hour, minute, second;
+      char buf[64];
+      std::string out = " Card Id  \t  Last Access Time  \r\n";
+      for(int i = 0; i < id(max_keys); i++)
+      {
+        key = id(stored_keys)[i];
+        if(key != -1)
+        {
+          date = id(last_access_date)[i];
+          time = id(last_access_time)[i];
+          if(date == -1 || time == -1) {
+            // If no access time found 
+            // 0x00000000     -- NOT YET --    
+            snprintf(buf, sizeof(buf), "%#10.8x\t    -- NOT YET --   \n", key);
+          } else {
+            // If user already used a card
+            // 0x00000000 2019-22-11T12:11:11Z  
+            year = floor(date / 10000);
+            month = floor((date - year * 10000) / 100);
+            day = (date - year * 10000 - month * 100);
+            hour = floor(time / 10000);
+            minute = floor((time - hour * 10000) / 100);
+            second = (time - hour * 10000 - minute * 100);
+            snprintf(buf, sizeof(buf), "%#10.8x\t%.4d-%.2d-%.2dT%.2d:%.2d:%.2dZ\n",
+                key,
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second);
+          };
+          out.append(std::string(buf));
+        }
+      };
+      return out;
+
+script:
+  - id: publish_key_state
+    mode: parallel
+    parameters:
+      topic: string
+      key: int
+      state: string
+    then:
+      - lambda: |-
+          auto t = id(ntp_time).utcnow();
+          if(!t.is_valid())
+          {
+            ESP_LOGW("KEYS", "Time is not set. No access events will be registered.");
+            return;
+          };
+          char buf[21];
+          snprintf(buf, sizeof(buf), "%.4d-%.2d-%.2dT%.2d:%.2d:%.2dZ", 
+              t.year,
+              t.month,
+              t.day_of_month,
+              t.hour,
+              t.minute,
+              t.second);
+          auto t_str = std::string(buf);
+          if(state == "GRANTED") {
+            id(last_used_card) = key;
+            id(last_access) = t_str;
+          };
+          if(id(mqtt_service)->is_connected())
+          {
+            id(mqtt_service).publish_json(topic.c_str(), [=](JsonObject root) {
+              root["keyCode"] = key;
+              root["message"] = state.c_str();
+              root["eventTimestamp"] = t_str;
+            });
+          } else {
+            ESP_LOGW("KEYS", "MQTT not connected. No access events will be registered.");
+          };
+  - id: blink_syserr
+    mode: single
+    then:
+      - light.turn_on: led_green
+      - delay: 0.5s
+      - light.turn_off: led_green
+      - light.turn_on: led_red
+      - delay: 0.5s
+      - light.turn_off: led_red
+      - light.turn_on: led_green
+      - delay: 0.5s
+      - light.turn_off: led_green
+      - light.turn_on: led_red
+      - delay: 0.5s
+      - light.turn_off: led_red
+      - light.turn_on: led_green
+      - delay: 0.5s
+      - light.turn_off: led_green
+      - light.turn_on: led_red
+      - delay: 0.5s
+      - light.turn_off: led_red
+  - id: blink_allow
+    mode: single
+    then:
+      - light.turn_on: led_green
+      - delay: 2.5s
+      - light.turn_off: led_green
+  - id: blink_deny
+    mode: single
+    then:
+      - light.turn_on: led_red
+      - delay: 2.5s
+      - light.turn_off: led_red
+  - id: blink_critical
+    mode: single
+    then:
+      - light.turn_on: led_red
+      - delay: 0.2s
+      - light.turn_off: led_red
+      - delay: 0.2s
+      - light.turn_on: led_red
+      - delay: 0.2s
+      - light.turn_off: led_red
+      - delay: 0.2s
+      - light.turn_on: led_red
+      - delay: 0.2s
+      - light.turn_off: led_red
+  - id: blink_success
+    mode: single
+    then:
+      - light.turn_on: led_green
+      - delay: 0.2s
+      - light.turn_off: led_green
+      - delay: 0.2s
+      - light.turn_on: led_green
+      - delay: 0.2s
+      - light.turn_off: led_green
+      - delay: 0.2s
+      - light.turn_on: led_green
+      - delay: 0.2s
+      - light.turn_off: led_green
+  - id: key_add
+    mode: single
+    then:
+      - light.turn_on:
+          id: led_green
+          effect: slow_blink
+      - lambda: |-
+          id(service_mode) = true;
+          id(key_read) = false;
+          id(current_key) = -1;
+      - wait_until:
+          condition:
+            lambda: return id(key_read);
+          timeout: 5s
+      - light.turn_off:
+          id: led_green
+      - lambda: |-
+          if(!id(key_read)) {
+            ESP_LOGI("KEYS", "No keys read. No keys has been added.");
+            id(key_read) = false;
+            id(current_key) = -1;
+            id(service_mode) = false;
+            return;
+          }
+          int key_counter = 0;
+          while(key_counter < id(max_keys))
+          {
+            if(id(stored_keys)[key_counter] == -1) {
+              ESP_LOGD("KEYS", "Found the first empty slot at %d.", key_counter);
+              break;
+            }
+            key_counter++;
+          }
+          if(key_counter == id(max_keys))
+          {
+            ESP_LOGW("KEYS", "Unable to add more than %d keys to storage.", max_keys);
+            id(blink_critical).execute();
+            id(key_read) = false;
+            id(current_key) = -1;
+            id(service_mode) = false;
+            return;
+          }
+          for(auto key : id(stored_keys))
+          {
+            if(key == id(current_key))
+            {
+              ESP_LOGI("KEYS", "Key %d has been already added to storage.", id(current_key));
+              id(key_read) = false;
+              id(current_key) = -1;
+              id(service_mode) = false;
+              return;
+            };
+          };
+          id(stored_keys)[key_counter] = id(current_key);
+          id(last_access_date)[key_counter] = -1;
+          id(last_access_time)[key_counter] = -1;
+          ESP_LOGI("KEYS", "Successfully added key %d to slot %d.", id(stored_keys)[key_counter], key_counter);
+          id(publish_key_state).execute("kvb/access/management", id(current_key), "ADDED");
+          id(blink_success).execute();
+          id(key_read) = false;
+          id(current_key) = -1;
+          id(service_mode) = false;
+          return;
+  - id: key_remove
+    mode: single
+    then:
+      - globals.set:
+          id: service_mode
+          value: "true"
+      - light.turn_on:
+          id: led_green
+          effect: slow_blink
+      - light.turn_on:
+          id: led_red
+          effect: slow_blink
+      - wait_until:
+          condition:
+            lambda: return id(key_read);
+          timeout: 5s
+      - lambda: |-
+          id(led_green).turn_off();
+          id(led_red).turn_off();
+          if(!id(key_read)) {
+            ESP_LOGI("KEYS", "No keys read. No keys has been deleted.");
+            id(key_read) = false;
+            id(current_key) = -1;
+            id(service_mode) = false;
+            return;
+          }
+          int key_counter = 0;
+          while(key_counter < id(max_keys))
+          {
+            if(id(stored_keys)[key_counter] == id(current_key)) {
+              ESP_LOGD("KEYS", "Key %d to delete found in %d slot.", id(current_key), key_counter);
+              break;
+            };
+            key_counter++;
+          }
+          if(key_counter == id(max_keys))
+          {
+            ESP_LOGW("KEYS", "Key %d not found in any slots. Nothing to delete.", id(current_key));
+            id(blink_critical).execute();
+            id(key_read) = false;
+            id(current_key) = -1;
+            id(service_mode) = false;
+            return;
+          }
+          id(stored_keys)[key_counter] = -1;
+          id(last_access_date)[key_counter] = -1;
+          id(last_access_time)[key_counter] = -1;
+          ESP_LOGI("KEYS", "Successfully removed key %d from slot %d.",
+                                id(current_key), key_counter);
+          id(publish_key_state).execute("kvb/access/management", id(current_key), "REMOVED");
+          id(key_read) = false;
+          id(current_key) = -1;
+          id(service_mode) = false;
+          id(blink_success).execute();
+          return;
+  - id: key_clear
+    mode: single
+    then:
+      - globals.set:
+          id: service_mode
+          value: "true"
+      - light.turn_on:
+          id: led_red
+          effect: slow_blink
+      - lambda: |-
+          for(int i = 0; i < id(max_keys); i++)
+          {
+            if(id(stored_keys)[i] != -1) {
+              id(publish_key_state).execute("kvb/access/management", id(stored_keys)[i], "REMOVED");
+            };
+            id(stored_keys)[i] = -1;
+            id(last_access_date)[i] = -1;
+            id(last_access_time)[i] = -1;
+          };
+          ESP_LOGI("KEYS", "All keys have been removed.");
+          return;
+      - light.turn_off: led_red
+      - delay: 0.5s
+      - light.turn_on: led_red
+      - light.turn_on: led_green
+      - delay: 0.5s
+      - light.turn_off: led_red
+      - light.turn_off: led_green
+      - globals.set:
+          id: service_mode
+          value: "false"
+  - id: key_check
+    mode: queued
+    then:
+      - lambda: |-
+          // while(!id(key_read) && !id(service_mode)) {
+          //   sleep(1000);
+          // }
+          if(id(service_mode))
+          {
+            ESP_LOGI("KEYS", "Service mode is ON. Keys checks are disabled.");
+            return;
+          };
+          if(id(key_read))
+          {
+            int key_counter = 0;
+            while(key_counter < id(max_keys))
+            {
+              if(id(stored_keys)[key_counter] == id(current_key))
+              {
+                ESP_LOGI("KEYS", "Key %d found in storage.", id(current_key));
+                break;
+              }
+              key_counter++;
+            };
+
+            if(key_counter == id(max_keys))
+            {
+              ESP_LOGW("KEYS", "Unknown key: %d. Access Denied.", id(current_key));
+              id(blink_deny).execute();
+              id(publish_key_state).execute("kvb/access/event", id(current_key), "DENIED");
+              id(current_key) = -1;
+              id(key_read) = false;
+              return;
+            };
+            auto access_time = id(ntp_time).utcnow();
+            if(!access_time.is_valid()) {
+              ESP_LOGW("KEYS", "Time syncronization required before using keys functionality.");
+              id(blink_syserr).execute();
+            } else {
+              ESP_LOGI("KEYS", "Access Granted for key: %d", id(current_key));
+              id(last_access_time)[key_counter] = 
+                access_time.second +
+                access_time.minute * 100 +
+                access_time.hour * 10000;
+              id(last_access_date)[key_counter] = 
+                access_time.day_of_month +
+                access_time.month * 100 +
+                access_time.year * 10000;
+              id(publish_key_state).execute("kvb/access/event", id(current_key), "GRANTED");
+              id(btn_gates_full).press();            
+              id(blink_allow).execute();
+            }
+            id(current_key) = -1;
+            id(key_read) = false;
+          }
