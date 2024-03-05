@@ -1,0 +1,11 @@
+#pragma once
+
+#define LOG_EVENT_TYPE_FAIL "FAILURE"
+#define LOG_EVENT_TYPE_WARN "WARNING"
+#define LOG_EVENT_TYPE_SYSERROR "ERROR"
+#define LOG_EVENT_TYPE_INFO "INFO"
+
+#define LOG_CATEGORY_NODE "Node"
+#define LOG_CATEGORY_POWER_SOURCE "Power Source"
+#define LOG_CATEGORY_PROBLEM "Problem"
+#define LOG_CATEGORY_SERVICE "Service"

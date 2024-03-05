@@ -1,0 +1,1469 @@
+substitutions:
+  voltage_normal: '230'
+  supported_load_level: '32'
+  voltage_min_bound: '120'
+  voltage_max_bound: '280'
+  voltage_warning_lower_level: '170'
+  voltage_warning_upper_level: '240'
+  voltage_failure_lower_level: '150'
+  voltage_failure_upper_level: '270'
+  phase_shift_warning_level: '5.0'
+  phase_shift_failure_level: '20.0'
+  overload_warning_level: '5.0'
+  overload_failure_level: '20.0'
+  energy_source_name: !secret energy_provider
+  tg_bot_token: !secret tg_token_id
+  tg_chat_id: !secret tg_chat_id
+  grafana_url: !secret grafana_url
+  ha_url: !secret ha_url
+  case_pincode: !secret pincode
+
+esphome:
+  name: energy-control
+  comment: Energy Control
+  project:
+    name: "vks.control_energy"
+    version: "1.0"
+  libraries:
+    - SPI
+    - FS
+    - SD
+    - FFat
+    - ArduinoJson
+  includes:
+    - csv_strings.h
+    - tg_bot_strings.h
+    - log_strings.h
+    - sdcard.h
+    - settings.h
+    - problems.h
+    - snapshot.h
+  platformio_options:
+    build_flags: -DFS_NO_GLOBALS
+    lib_ldf_mode: deep+    
+  on_boot:
+    priority: 600
+    then:
+      - ds1307.read_time: rtc_clock
+      - lambda: |-
+          id(card_available) = SD.begin(5);
+          if(!id(card_available)) {
+            ESP_LOGW("SD", "Unable to mount SD card.");
+            return;
+          } else {
+            ESP_LOGD("Settings", "Loading settings...");
+            if(!settings::readSettings()) {
+              ESP_LOGE("Settings", "Unable to initialize settings data.");
+            }
+          };
+          add_on_failure_callback([](Problems problem) { 
+            id(process_problem).execute(
+              static_cast<int>(problem),
+              static_cast<int>(ProblemState::FAILURE)
+              ); });
+          add_on_warning_callback([](Problems problem) { 
+            id(process_problem).execute(
+              static_cast<int>(problem), 
+              static_cast<int>(ProblemState::WARNING)
+              ); });
+          add_on_restore_callback([](Problems problem) { 
+            id(process_problem).execute(
+              static_cast<int>(problem),
+              static_cast<int>(ProblemState::NONE)
+              ); });
+          id(is_loaded) = true;
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    version: 2.0.14
+    platform_version: 6.5.0
+
+logger:
+
+dallas:
+  - pin: GPIO14
+    id: case_temp
+
+api:
+  encryption:
+    key: !secret enc_key
+  reboot_timeout: 30s
+  services:
+    - service: tg_test_bot
+      variables: 
+        data_to_test: int
+      then:
+        - lambda: |-
+            switch(data_to_test) {
+              case 1:
+                saveToSnapshot(id(em_x_total_counter).state);
+                id(tg_bot_publish).execute(
+                  generateTelegramBotSummaryMessage("${energy_source_name} - Test", "${ha_url}", "${grafana_url}"),
+                  false
+                );
+                break;
+              case 2:
+                saveToSnapshot(id(em_x_total_counter).state);
+                for(int i = 0; i < PROBLEMS_COUNT; i++) {
+                  id(tg_bot_publish).execute(
+                    generateProblemMessage("${energy_source_name} - Test", static_cast<Problems>(i), -1),
+                    false
+                  );
+                };
+                break;
+              case 0:
+              default:
+                id(tg_bot_publish).execute(
+                  "Just a test message",
+                  false
+                );
+                break;
+            }
+    - service: arm_home
+      then:
+        - lambda: |-
+            id(is_armed) = true;
+            sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Case Intrusion detection has been ACTIVATED.");
+    - service: disarm
+      variables:
+        code: string
+      then:
+        - lambda: |-
+            if(code == "$case_pincode") {
+              id(is_armed) = false; 
+              sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Case Intrusion detection has been DEACTIVATED.");
+            } else {
+              sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_FAIL, LOG_CATEGORY_NODE, "Case Intrusion detection - invalid pincode provided.");
+            }
+    - service: logs_clear
+      then:
+        - lambda: 
+            sdcard::deleteArchiveLogs();
+            sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Logs archive folder has been cleared.");
+            
+
+
+mqtt:
+  broker: !secret mqtt_broker
+  port: 1883
+  username: !secret mqtt_usr
+  password: !secret mqtt_pwd
+  discovery: false
+  topic_prefix: !secret mqtt_prefix
+  keepalive: 5s
+
+ota:
+  password: !secret ota_password
+
+wifi:
+  networks:
+    - ssid: !secret wifi_name
+      password: !secret wifi_pwd
+    - ssid: !secret wifi_name_bak
+      password: !secret wifi_pwd_bak
+  power_save_mode: none
+  ap:
+    ssid: "VKS Energy Control"
+    password: !secret wifi_pwd_ap
+
+time:
+  - platform: ds1307
+    timezone: Europe/Moscow
+    id: rtc_clock
+    update_interval: never
+    on_time:
+      - seconds: 0
+        minutes: 59
+        hours: 23
+        then:
+          - script.execute: daily_summary
+      - seconds: 0
+        minutes: 0
+        hours: 9
+        then:
+          - script.execute: monthly_report
+  - platform: homeassistant
+    on_time_sync:
+      then:
+        - ds1307.write_time:
+
+globals:
+# snapshot data
+  - id: snapshot_data
+    type: uint8_t[512]
+    restore_value: true
+
+# common data
+  - id: is_loaded
+    type: boolean
+    initial_value: "false"
+  - id: is_file_open
+    type: boolean
+    initial_value: "false"
+  - id: card_available
+    type: boolean
+    initial_value: 'false'
+  - id: is_armed
+    type: boolean
+    initial_value: 'true'
+    restore_value: true
+
+deep_sleep:
+  run_duration: 
+    gpio_wakeup_reason: 30s
+    default: 30s
+  sleep_duration: 10min
+  id: dsleep 
+
+output:
+  - platform: gpio
+    pin: GPIO32
+    id: power_control_pin
+  - platform: gpio
+    pin: GPIO25
+    id: light_signal_pin
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  id: i2c_bus
+
+uart:
+  tx_pin: GPIO17
+  rx_pin: GPIO16
+  baud_rate: 9600
+  stop_bits: 1
+  id: modbus_uart_bus
+
+modbus:
+  id: modbus_bus
+  send_wait_time: 500ms
+  uart_id: modbus_uart_bus
+
+modbus_controller:
+  - id: main_energy_meter
+    modbus_id: modbus_bus
+    address: 1
+    setup_priority: -10
+    offline_skip_updates: 2
+
+sensor:
+  - platform: internal_temperature
+    name: "ESP32 Internal Temperature"
+    entity_category: "diagnostic"
+    update_interval: 5s
+
+  - platform: dallas
+    name: "House Connection Box Temperature"
+    accuracy_decimals: 2
+    id: case_temperature_sensor
+    unit_of_measurement: °C
+    dallas_id: case_temp
+    index: 0
+    on_value:
+      then:
+        - lambda: monitorOverheating(x);
+
+  - platform: duty_time
+    name: "Energy Uninterrupted"
+    sensor: power_input_presence
+
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Line Frequency"
+    register_type: read
+    value_type: FP32
+    device_class: frequency
+    accuracy_decimals: 3
+    state_class: measurement
+    unit_of_measurement: Hz
+    address: 0x0046
+    icon: mdi:sine-wave
+    id: line_x_freq
+
+  - platform: total_daily_energy
+    name: "Energy Consumed Per Day"
+    id: tde_counter
+    power_id: em_x_power
+    unit_of_measurement: kWh
+    state_class: "total_increasing"
+    device_class: "energy"
+    accuracy_decimals: 3
+    filters:
+      - multiply: 0.001
+
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    id: em_x_total_counter
+    name: "Energy Consumed (Counter)"
+    register_type: read
+    address: 0x0156
+    value_type: FP32
+    unit_of_measurement: kWh
+    state_class: "total_increasing"
+    device_class: "energy"
+    accuracy_decimals: 3
+    icon: mdi:meter-electric-outline
+    # on_value:
+    #   then:
+    #     - lambda: |-
+    #         snapData.content.dataset.totalData.energyConsumption = x;
+
+  # Power
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power (Phase A)"
+    id: em_a_power
+    register_type: read
+    address: 0x000C
+    value_type: FP32
+    unit_of_measurement: W
+    device_class: "power"
+    state_class: "measurement"
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power (Phase B)"
+    id: em_b_power
+    register_type: read
+    address: 0x000E
+    value_type: FP32
+    unit_of_measurement: W
+    device_class: "power"
+    state_class: "measurement"
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power (Phase C)"
+    id: em_c_power
+    register_type: read
+    address: 0x0010
+    value_type: FP32
+    unit_of_measurement: W
+    device_class: "power"
+    state_class: "measurement"
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power (Total)"
+    id: em_x_power
+    register_type: read
+    address: 0x0034
+    value_type: FP32
+    unit_of_measurement: W
+    state_class: "measurement"
+    device_class: "power"
+    accuracy_decimals: 3
+
+  # Voltage
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Voltage (Phase A)"
+    id: em_a_voltage
+    register_type: read
+    address: 0x0000
+    value_type: FP32
+    unit_of_measurement: V
+    device_class: "voltage"
+    state_class: "measurement"
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Voltage (Phase B)"
+    id: em_b_voltage
+    register_type: read
+    address: 0x0002
+    value_type: FP32
+    device_class: "voltage"
+    state_class: "measurement"
+    unit_of_measurement: V
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Voltage (Phase C)"
+    id: em_c_voltage
+    register_type: read
+    address: 0x0004
+    value_type: FP32
+    device_class: "voltage"
+    state_class: "measurement"
+    unit_of_measurement: V
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+  - platform: template
+    id: em_x_voltage
+    name: "Average Voltage (L-N)"
+    device_class: voltage
+    state_class: measurement
+    unit_of_measurement: V
+    update_interval: 1s
+    accuracy_decimals: 3
+    icon: mdi:flash-triangle-outline
+    lambda: |-
+      float a = -1;
+      float b = -1;
+      float c = -1;
+      if(id(em_a_voltage).state >= 0) { a = id(em_a_voltage).state; };
+      if(id(em_b_voltage).state >= 0) { b = id(em_b_voltage).state; };
+      if(id(em_c_voltage).state >= 0) { c = id(em_c_voltage).state; };
+      if((a >= 0) && (b >= 0) && (c >= 0)) {
+        return (a + b + c) / 3.0;
+      } else {
+        return NAN;
+      };
+  - platform: template
+    id: em_x_voltage_min
+    name: "Minimal Voltage (L-N)"
+    device_class: voltage
+    state_class: measurement
+    unit_of_measurement: V
+    update_interval: 0.5s
+    accuracy_decimals: 3
+    icon: mdi:flash-triangle-outline
+    lambda: |-
+      if((id(em_a_voltage).state < id(em_b_voltage).state) &&
+         (id(em_a_voltage).state < id(em_c_voltage).state)) {
+          return id(em_a_voltage).state;
+         } else if((id(em_b_voltage).state < id(em_a_voltage).state) &&
+                   (id(em_b_voltage).state < id(em_c_voltage).state)) {
+                    return id(em_b_voltage).state;
+                   } else {
+                    return id(em_c_voltage).state;
+                   };
+  - platform: template
+    id: em_x_voltage_max
+    name: "Maximal Voltage (L-N)"
+    device_class: voltage
+    state_class: measurement
+    unit_of_measurement: V
+    update_interval: 0.5s
+    accuracy_decimals: 3
+    icon: mdi:flash-triangle-outline
+    lambda: |-
+      if((id(em_a_voltage).state > id(em_b_voltage).state) &&
+         (id(em_a_voltage).state > id(em_c_voltage).state)) {
+          return id(em_a_voltage).state;
+         } else if((id(em_b_voltage).state > id(em_a_voltage).state) &&
+                   (id(em_b_voltage).state > id(em_c_voltage).state)) {
+                    return id(em_b_voltage).state;
+                   } else {
+                    return id(em_c_voltage).state;
+                   };
+
+  # Current
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Current (Phase A)"
+    id: em_a_current
+    register_type: read
+    address: 0x0006
+    value_type: FP32
+    device_class: "current"
+    state_class: "measurement"
+    unit_of_measurement: A
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Current (Phase B)"
+    id: em_b_current
+    register_type: read
+    address: 0x0008
+    value_type: FP32
+    device_class: "current"
+    state_class: "measurement"
+    unit_of_measurement: A
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Current (Phase C)"
+    id: em_c_current
+    register_type: read
+    address: 0x00A0
+    value_type: FP32
+    device_class: "current"
+    state_class: "measurement"
+    unit_of_measurement: A
+    accuracy_decimals: 3
+    on_value:
+      then:
+        - lambda: |-
+            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+  - platform: template
+    id: em_x_current_avg
+    name: "Average Current Per Phase"
+    device_class: current
+    state_class: measurement
+    unit_of_measurement: A
+    update_interval: 1s
+    accuracy_decimals: 3
+    icon: mdi:flash-triangle
+    lambda: |-
+      float a = -1;
+      float b = -1;
+      float c = -1;
+      if(id(em_a_current).state >= 0) { a = id(em_a_current).state; };
+      if(id(em_b_current).state >= 0) { b = id(em_b_current).state; };
+      if(id(em_c_current).state >= 0) { c = id(em_c_current).state; };
+      if((a >= 0) && (b >= 0) && (c >= 0)) {
+        return (a + b + c) / 3.0;
+      } else {
+        return NAN;
+      };
+  - platform: template
+    id: em_x_current_sum
+    name: "Total Current"
+    device_class: current
+    state_class: measurement
+    unit_of_measurement: A
+    accuracy_decimals: 3
+    update_interval: 1s
+    icon: mdi:flash-triangle
+    lambda: |-
+      float a = -1;
+      float b = -1;
+      float c = -1;
+      if(id(em_a_current).state >= 0) { a = id(em_a_current).state; };
+      if(id(em_b_current).state >= 0) { b = id(em_b_current).state; };
+      if(id(em_c_current).state >= 0) { c = id(em_c_current).state; };
+      if((a >= 0) && (b >= 0) && (c >= 0)) {
+        return (a + b + c);
+      } else {
+        return NAN;
+      };
+  - platform: template
+    name: "Load Disbalance (Phase A)"
+    id: em_a_load_disbalance
+    state_class: measurement
+    icon: mdi:scale-unbalanced
+    unit_of_measurement: "%"
+    update_interval: 1s
+    accuracy_decimals: 1
+    lambda: |-
+      auto base = id(em_x_current_avg).state;
+      if(base > 0) {
+        return id(em_a_current).state / base;
+      } else {
+        return NAN;
+      }
+  - platform: template
+    name: "Load Disbalance (Phase B)"
+    id: em_b_load_disbalance
+    icon: mdi:scale-unbalanced
+    update_interval: 1s
+    state_class: measurement
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    lambda: |-
+      auto base = id(em_x_current_avg).state;
+      if(base > 0) {
+        return id(em_b_current).state / base;
+      } else {
+        return NAN;
+      }
+  - platform: template
+    name: "Load Disbalance (Phase C)"
+    id: em_c_load_disbalance
+    icon: mdi:scale-unbalanced
+    update_interval: 1s
+    state_class: measurement
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    lambda: |-
+      auto base = id(em_x_current_avg).state;
+      if(base > 0) {
+        return id(em_c_current).state / base;
+      } else {
+        return NAN;
+      };  
+  - platform: template
+    name: "Load Disbalance (Max)"
+    id: em_x_load_disbalance_max
+    icon: mdi:scale-unbalanced
+    state_class: measurement
+    update_interval: 1s
+    unit_of_measurement: "%"
+    accuracy_decimals: 1
+    lambda: |-
+      if(
+        (id(em_c_load_disbalance).state >= id(em_a_load_disbalance).state) &&
+        (id(em_c_load_disbalance).state >= id(em_b_load_disbalance).state)
+      ) {
+        return id(em_c_load_disbalance).state;
+      } else {
+        if(
+          (id(em_b_load_disbalance).state >= id(em_a_load_disbalance).state) &&
+          (id(em_b_load_disbalance).state >= id(em_c_load_disbalance).state)
+        ) {
+          return id(em_b_load_disbalance).state;
+        } else {
+          return id(em_a_load_disbalance).state;
+        }
+      };
+
+  # Apparent Power
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Apparent Power (Phase A)"
+    id: em_a_apparent_power
+    register_type: read
+    address: 0x0012
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VA
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Apparent Power (Phase B)"
+    id: em_b_apparent_power
+    register_type: read
+    address: 0x0014
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VA
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Apparent Power (Phase C)"
+    id: em_c_apparent_power
+    register_type: read
+    address: 0x0016
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VA
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Apparent Power (Total)"
+    id: em_x_apparent_power
+    register_type: read
+    address: 0x0038
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VA
+    accuracy_decimals: 3
+
+  # Reactive Power
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Reactive Power (Phase A)"
+    id: em_a_reactive_power
+    register_type: read
+    address: 0x0018
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VAr
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Reactive Power (Phase B)"
+    id: em_b_reactive_power
+    register_type: read
+    address: 0x001A
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VAr
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Reactive Power (Phase C)"
+    id: em_c_reactive_power
+    register_type: read
+    address: 0x001C
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VAr
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Reactive Power (Total)"
+    id: em_x_reactive_power
+    register_type: read
+    address: 0x003C
+    value_type: FP32
+    device_class: ""
+    state_class: "measurement"
+    unit_of_measurement: VAr
+    accuracy_decimals: 3
+
+  # Power Factor
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power Factor (Phase A)"
+    id: em_a_power_factor
+    register_type: read
+    address: 0x001E
+    value_type: FP32
+    device_class: "power_factor"
+    state_class: "measurement"
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power Factor (Phase B)"
+    id: em_b_power_factor
+    register_type: read
+    address: 0x0020
+    value_type: FP32
+    device_class: "power_factor"
+    state_class: "measurement"
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power Factor (Phase C)"
+    id: em_c_power_factor
+    register_type: read
+    address: 0x0022
+    value_type: FP32
+    device_class: "power_factor"
+    state_class: "measurement"
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+  - platform: modbus_controller
+    modbus_controller_id: main_energy_meter
+    name: "Power Factor (Total)"
+    id: em_x_power_factor
+    register_type: read
+    address: 0x003E
+    value_type: FP32
+    device_class: "power_factor"
+    state_class: "measurement"
+    unit_of_measurement: ""
+    accuracy_decimals: 3
+
+  - platform: template
+    name: "SD Card Size"
+    lambda: |-
+      if(id(card_available)) {
+        return SD.cardSize() / 1024 / 1024;
+      } else {
+        return NAN;
+      };
+    unit_of_measurement: "MB"
+    update_interval: 5s
+    device_class: data_size
+    entity_category: DIAGNOSTIC
+  - platform: template
+    name: "SD Volume Total Size"
+    lambda: |-
+      if(id(card_available)) {
+        return SD.totalBytes() / 1024 / 1024;
+      } else {
+        return NAN;
+      };
+    unit_of_measurement: "MB"
+    update_interval: 5s
+    device_class: data_size
+    entity_category: DIAGNOSTIC
+  - platform: template
+    name: "SD Volume Free Size"
+    lambda: |-
+      if(id(card_available)) {
+        return (SD.totalBytes() - SD.usedBytes()) / 1024 / 1024;
+      } else {
+        return NAN;
+      };
+    unit_of_measurement: "MB"
+    update_interval: 5s
+    device_class: data_size
+    entity_category: DIAGNOSTIC
+  - platform: template
+    name: "Frequency Warning Level (±Hz)"
+    lambda: return settings::settingsData.content.settings.frequencyShiftWarningLevel;
+    id: config_freq_warning_level
+    unit_of_measurement: "Hz"
+    update_interval: 15s
+    entity_category: DIAGNOSTIC
+  - platform: template
+    name: "Frequency Failure Level (±Hz)"
+    lambda: return settings::settingsData.content.settings.frequencyShiftFailureLevel;
+    id: config_freq_failure_level
+    unit_of_measurement: "Hz"
+    update_interval: 15s
+    entity_category: DIAGNOSTIC
+
+text_sensor:
+  - platform: template
+    name: "Load Balance"
+    icon: mdi:scale-balance
+    id: em_x_load_balance_state
+    update_interval: 1s
+    lambda: |-
+      if(getProblem(Problems::PHASE_SHIFT) == ProblemState::FAILURE) {
+        return {"CRITICAL"};
+      } else if (getProblem(Problems::PHASE_SHIFT) == ProblemState::WARNING) {
+        return {"BAD"};
+      } else if (id(em_x_load_disbalance_max).state > 0.0) {
+        return {"GOOD"};
+      } else {
+        return {"PERFECT"};
+      };
+  - platform: template
+    name: "SD Card Type"
+    entity_category: DIAGNOSTIC
+    update_interval: 1s
+    lambda: |-
+      if(id(card_available)) {
+        switch (SD.cardType())
+        {
+          case CARD_NONE:
+            return {"NONE"};
+          case CARD_MMC:
+            return {"MMC"};
+          case CARD_SD:
+            return {"SDSC"};
+          case CARD_SDHC:
+            return {"SDHC"};  
+          default:
+            return {"UNKNOWN"};
+        }      
+      } else {
+        return {"NONE"};
+      };
+
+binary_sensor:
+  - platform: template
+    name: "Powered On?"
+    device_class: connectivity
+    id: power_input_presence
+    icon: mdi:transmission-tower-import
+    lambda: |-
+      return !id(main_energy_meter).get_module_offline();
+    on_state:
+      then:
+        - lambda: |-
+            // monitorPowerFailure(x);
+  - platform: gpio
+    pin: GPIO35
+    name: "Power Protection Failure"
+    device_class: problem
+    icon: mdi:transmission-tower-off
+    id: power_input_protection_failure
+    on_state:
+      then:
+        - lambda: |-
+            monitorBreaker(x);
+  - platform: gpio
+    pin: 
+      number: GPIO27
+      inverted: true
+    name: "UPS AC State"
+    id: ups_ac_state
+    icon: mdi:power-plug
+    on_state:
+      then:
+        - lambda: |-
+            monitorACLineFailure(x);
+            monitorPowerFailure(x);
+  - platform: gpio
+    pin: 
+      number: GPIO33
+      inverted: true
+    device_class: battery
+    name: "UPS Battery State"
+    id: ups_battery_state
+    icon: mdi:battery-alert-variant-outline
+    on_state:
+      then:
+        - lambda: |-
+            monitorBatteryFailure(x);
+  - platform: gpio
+    pin: 
+      number: GPIO34
+      inverted: true
+    name: "Case State"
+    id: case_open
+    icon: mdi:shield-lock-open
+    device_class: door
+    on_state:
+      then:
+        - lambda: |-
+            monitorCaseIntrusion(x && id(is_armed));
+
+number:
+  - platform: template
+    name: "Undervoltage Warning Level"
+    id: conf_undervoltage_warn_lvl
+    min_value: $voltage_min_bound
+    max_value: $voltage_normal
+    step: 0.5
+    unit_of_measurement: "V"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.undervoltageWarningLevel;
+    set_action:
+      then:
+        - lambda: |-
+            if(x <= id(conf_undervoltage_fail_lvl).state) {
+              settings::settingsData.content.settings.undervoltageWarningLevel = 
+                    id(conf_undervoltage_fail_lvl).state + 1.0;
+            } else {
+              settings::settingsData.content.settings.undervoltageWarningLevel = x;
+            }; 
+            settings::writeSettings();
+  - platform: template
+    name: "Undervoltage Failure Level"
+    id: conf_undervoltage_fail_lvl
+    min_value: $voltage_min_bound
+    max_value: $voltage_normal
+    step: 0.5
+    unit_of_measurement: "V"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.undervoltageFailureLevel;
+    set_action:
+      then:
+        - lambda: |-
+            if(x >= id(conf_undervoltage_warn_lvl).state) {
+              settings::settingsData.content.settings.undervoltageFailureLevel = 
+                id(conf_undervoltage_warn_lvl).state - 1.0;
+            } else {
+              settings::settingsData.content.settings.undervoltageFailureLevel = x;
+            };
+            settings::writeSettings();
+  - platform: template
+    name: "Overvoltage Warning Level"
+    id: conf_overvoltage_warn_lvl
+    min_value: $voltage_normal
+    max_value: $voltage_max_bound
+    step: 0.5
+    unit_of_measurement: "V"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.overvoltageWarningLevel;
+    set_action:
+      then:
+        - lambda: |-
+            if(x >= id(conf_overvoltage_fail_lvl).state) {
+              settings::settingsData.content.settings.overvoltageWarningLevel = 
+                id(conf_overvoltage_fail_lvl).state - 1.0;
+            } else {
+              settings::settingsData.content.settings.overvoltageWarningLevel = x;
+            }; 
+            settings::writeSettings();
+  - platform: template
+    name: "Overvoltage Failure Level"
+    id: conf_overvoltage_fail_lvl
+    min_value: $voltage_normal
+    max_value: $voltage_max_bound
+    step: 0.5
+    unit_of_measurement: "V"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.overvoltageFailureLevel;
+    set_action:
+      then:
+        - lambda: |-
+            if(x <= id(conf_overvoltage_warn_lvl).state) {
+              settings::settingsData.content.settings.overvoltageFailureLevel = 
+                id(conf_overvoltage_warn_lvl).state + 1.0;
+            } else {
+              settings::settingsData.content.settings.overvoltageFailureLevel = x;
+            };
+            settings::writeSettings();
+  - platform: template
+    name: "Phase Disbalance Warning Level"
+    id: phase_shift_warn_lvl
+    min_value: 0.5
+    max_value: 10.0
+    step: 0.5
+    unit_of_measurement: "%"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.phaseShiftWarningLevel;
+    set_action:
+      then:
+        - lambda: |-
+            settings::settingsData.content.settings.phaseShiftWarningLevel = x; 
+            settings::writeSettings();
+  - platform: template
+    name: "Phase Disbalance Critical Level"
+    id: phase_shift_fail_lvl
+    min_value: 10.5
+    max_value: 100.0
+    step: 0.5
+    unit_of_measurement: "%"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.phaseShiftFailureLevel;
+    set_action:
+      then:
+        - lambda: |-
+            settings::settingsData.content.settings.phaseShiftFailureLevel = x; 
+            settings::writeSettings();
+  - platform: template
+    name: "Overload Warning Level"
+    id: overload_warn_lvl
+    min_value: 16
+    max_value: $supported_load_level
+    step: 0.5
+    unit_of_measurement: "A"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.overloadWarningLevel;
+    set_action:
+      then:
+        - lambda: |-
+            settings::settingsData.content.settings.overloadWarningLevel = x; 
+            settings::writeSettings();
+  - platform: template
+    name: "Overload Critical Level"
+    id: overload_fail_lvl
+    min_value: $supported_load_level
+    max_value: 100
+    step: 0.5
+    unit_of_measurement: "A"
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.overloadFailureLevel;
+    set_action:
+      then:
+        - lambda: |-
+            settings::settingsData.content.settings.overloadFailureLevel = x; 
+            settings::writeSettings();
+  - platform: template
+    name: "Monthly Report Day"
+    id: monthly_report_day
+    min_value: 1
+    max_value: 31
+    step: 1
+    entity_category: CONFIG
+    lambda: |-
+      return settings::settingsData.content.settings.monthlyReportDay;
+    set_action:
+      then:
+        - lambda: |-
+            settings::settingsData.content.settings.monthlyReportDay =
+              static_cast<int>(x);
+            settings::writeSettings();
+
+light:
+  - platform: binary
+    output: light_signal_pin
+    id: light_signal
+    effects:
+      - strobe:
+          name: slow_warn
+          colors:
+            - state: true
+              duration: 2s
+            - state: false
+              duration: 2s
+      - strobe:
+          name: alert
+          colors:
+            - state: true
+              duration: 250ms
+            - state: false
+              duration: 100ms
+            - state: true
+              duration: 250ms
+            - state: false
+              duration: 100ms
+            - state: true
+              duration: 250ms
+            - state: false
+              duration: 500ms
+            - state: true
+              duration: 250ms
+            - state: false
+              duration: 500ms
+      - strobe:
+          name: warning
+          colors:
+            - state: true
+              duration: 1s
+            - state: false
+              duration: 1s
+            - state: true
+              duration: 1s
+            - state: false
+              duration: 2s
+
+select:
+  - platform: template
+    name: "Gateway Control"
+    id: gateway_control_behavior
+    icon: mdi:gate-open
+    options:
+      - Always On
+      - Enabled When Online
+      - Disabled
+    entity_category: "CONFIG"
+    lambda: |-
+      return id(gateway_control_behavior).at(settings::settingsData.content.settings.gatewayNodePowerPolicy);
+    set_action:
+      - lambda: |-
+          auto aidx = id(gateway_control_behavior).active_index();
+          if(aidx.has_value())
+            settings::settingsData.content.settings.gatewayNodePowerPolicy
+              = aidx.value();
+          else
+            settings::settingsData.content.settings.gatewayNodePowerPolicy
+              = 0;
+          settings::writeSettings();
+          if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE) {
+            switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 2:
+              id(power_control_pin).turn_off();
+              break;
+            case 0: //Always on
+            case 1: //Enabled when online
+            default:
+              id(power_control_pin).turn_on();
+              break;
+            }
+          } else {
+            switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+              case 1: //Enabled when online
+              case 2: //Disabled
+                id(power_control_pin).turn_off();
+                break;
+              case 0: //Always on
+              default:
+                id(power_control_pin).turn_on();
+                break;
+            }
+          };
+
+switch:
+  - platform: template
+    name: "Generate Summary"
+    id: summary_enabled
+    icon: mdi:file-chart
+    entity_category: "CONFIG"
+    lambda: |-
+      return settings::settingsData.content.settings.publishSummary;
+    turn_on_action:
+      - lambda: |- 
+          settings::settingsData.content.settings.publishSummary = true;
+          settings::writeSettings();
+    turn_off_action:
+      - lambda: |- 
+          settings::settingsData.content.settings.publishSummary = false;
+          settings::writeSettings();
+
+button:
+  - platform: template
+    name: "Factory Reset Node"
+    icon: mdi:reload-alert
+    on_press:
+      - lambda: settings::resetSettings(true);
+  - platform: restart
+    name: "Reboot Node"
+
+interval:
+  - interval: 1s
+    then:
+      - script.execute:
+          id: power_monitor
+  - interval: 1s
+    then:
+      - lambda: |-
+          //Monitor card available.
+          if(!id(card_available)) {
+            ESP_LOGI("SD", "Trying to mount card...");
+            id(card_available) = SD.begin(5);
+            if(!id(card_available)) {
+              ESP_LOGW("SD", "Unable to mount SD card.");
+              return;
+            };
+          } else {
+            id(card_available) = (SD.cardType() != CARD_NONE && SD.cardType() != CARD_UNKNOWN);
+          };
+
+http_request:
+  useragent: esp32/device
+  timeout: 10s
+
+script:
+  - id: save_snapshot
+    mode: single
+    then:
+      - lambda: |-
+          saveToSnapshot(id(em_x_total_counter).state);
+          memcpy(id(snapshot_data), snapData.data, sizeof(snapData.data));
+
+  - id: load_snapshot
+    mode: single
+    then:
+      - lambda: |-
+          memcpy(snapData.data, id(snapshot_data), sizeof(snapData.data));
+          loadFromSnapshot(id(em_x_total_counter).state);
+
+  - id: tg_bot_publish
+    mode: queued
+    parameters:
+      message: string
+      silent: boolean
+    then:
+      - http_request.post:
+          url: "https://api.telegram.org/bot${tg_bot_token}/sendMessage"
+          headers:
+            Content-Type: application/json
+          json:
+            chat_id: ${tg_chat_id}
+            text: !lambda return message;
+            parse_mode: "MarkdownV2"
+            disable_notification: !lambda if(silent) { return "true"; } else { return "false"; };
+          verify_ssl: false
+
+  - id: process_problem
+    mode: queued
+    parameters:
+      problem_type: int
+      problem_state: int
+    then:
+      - mqtt.publish:
+          payload: !lambda |-
+            switch(problem_state) {
+              case ProblemState::NONE:
+                return "0";
+              case ProblemState::WARNING:
+                return "1";
+              case ProblemState::FAILURE:
+              default:
+                return "2";
+            }
+          topic: !lambda |-
+            char buffer[128];
+            snprintf(buffer, sizeof(buffer),
+              "Infra/Energy/Sources/${energy_source_name}/Problems/%s",
+              PROBLEMS_KEYS.at(static_cast<Problems>(problem_type))
+            );
+            return std::string(buffer).c_str();
+      - lambda: |-
+          if(!id(is_loaded))
+            return;
+          saveToSnapshot(id(em_x_total_counter).state);
+          double value = NAN;
+          switch(problem_type) {
+            case Problems::UNDERVOLTAGE:
+              value = id(em_x_voltage_min).state;
+              break;
+            case Problems::OVERVOLTAGE:
+              value = id(em_x_voltage_max).state;
+              break;
+            case Problems::OVERLOAD:
+              value = id(em_x_current_sum).state;
+              break;
+            case Problems::FREQUENCY_SHIFT:
+              value = abs(id(line_x_freq).state - FREQUENCY);
+              break;
+            case Problems::OVERHEAT:
+              value = id(case_temperature_sensor).state;
+            case Problems::PHASE_SHIFT:
+              value = id(em_x_load_disbalance_max).state;
+              break;
+            case Problems::GENERIC_POWER_FAILURE:
+              if(problem_state != ProblemState::NONE) {
+                id(power_fail).execute();
+              } else {
+                id(power_restore).execute();
+              };
+              break;
+            default:
+              break;
+          };
+          id(tg_bot_publish).execute(
+            generateProblemMessage("${energy_source_name}", static_cast<Problems>(problem_type), value),
+            false
+          );
+
+          switch(problem_state) {
+            case ProblemState::NONE:
+              sdcard::writeLogfile(
+                  id(rtc_clock).utcnow(),
+                    LOG_EVENT_TYPE_INFO,
+                    PROBLEMS_NAMES.at(static_cast<Problems>(problem_type)),
+                    "State has been normalized.");
+              break;
+            case ProblemState::WARNING:
+              sdcard::writeLogfile(
+                  id(rtc_clock).utcnow(),
+                    LOG_EVENT_TYPE_WARN,
+                    PROBLEMS_NAMES.at(static_cast<Problems>(problem_type)),
+                    "Reached a cautious state.");
+              break;
+            case ProblemState::FAILURE:
+            default:
+              sdcard::writeLogfile(
+                  id(rtc_clock).utcnow(),
+                    LOG_EVENT_TYPE_FAIL,
+                    PROBLEMS_NAMES.at(static_cast<Problems>(problem_type)),
+                    "Failure has been registered.");
+              break;
+          };
+
+  - id: daily_summary
+    mode: single
+    then:
+      - wait_until:
+          condition:
+            lambda: return id(rtc_clock).utcnow().is_valid() && sdcard::can_claim();
+          timeout: 5s
+      - lambda: |-
+          auto ts = id(rtc_clock).now();
+          auto current_counter = id(em_x_total_counter).state;
+          if(!ts.is_valid()) {
+            ESP_LOGE(TAG_SNAPSHOT, "Unable to write down summary data. No time defined.");
+            return;
+          };
+          saveToSnapshot(current_counter); //Using current day data in snapshot.     
+          if(!writeDailyLog(ts)) {
+            ESP_LOGE(TAG_SNAPSHOT, "Unable to write down summary data. IO error.");
+          };
+          if(settings::settingsData.content.settings.publishSummary) {
+            ESP_LOGI(TAG_SNAPSHOT, "Trying to publish summary to Telegram bot.");
+            id(tg_bot_publish).execute(
+              generateTelegramBotSummaryMessage("${energy_source_name}", "${ha_url}", "${grafana_url}"),
+              true);
+          };
+          commitDailyData(current_counter, id(rtc_clock).utcnow().timestamp); //Resetting snapshot data to brand new day.
+          resetCounters(); // Resetting problem counters.
+          saveToSnapshot(current_counter); //Using brand new day data in snapshot.
+          memcpy(id(snapshot_data), snapData.data, sizeof(snapData.data));
+
+  - id: power_restore
+    mode: single
+    then: 
+      - deep_sleep.prevent:
+      - mqtt.publish:
+          topic: Infra/Energy/Sources/${energy_source_name}/Active
+          payload: "true"
+      - delay: 5s
+      - lambda: |-
+          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 2:
+              id(power_control_pin).turn_off();
+              break;
+            case 0: //Always on
+            case 1: //Enabled when online
+            default:
+              id(power_control_pin).turn_on();
+              break;
+          };
+
+  - id: power_fail
+    mode: single
+    then:
+      - mqtt.publish:
+          topic: Infra/Energy/Sources/${energy_source_name}/Active
+          payload: "false"
+      - delay: 5s
+      - lambda: |-
+          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 1: //Enabled when online
+            case 2: //Disabled
+              id(power_control_pin).turn_off();
+              break;
+            case 0: //Always on
+            default:
+              id(power_control_pin).turn_on();
+              break;
+          };
+      - deep_sleep.allow:
+
+  - id: power_monitor
+    mode: queued
+    then:
+      - mqtt.publish_json:
+          topic: Infra/Energy/Sources/${energy_source_name}/Monitor
+          qos: 2
+          retain: true
+          payload: |-
+            root["frequency"] = id(line_x_freq).state;
+            
+            auto power_data = root.createNestedObject("power");
+
+            auto active_power = power_data.createNestedObject("active");
+            auto apparent_power = power_data.createNestedObject("apparent");
+            auto reactive_power = power_data.createNestedObject("reactive");
+
+            active_power["A"] = id(em_a_power).state;
+            active_power["B"] = id(em_b_power).state;
+            active_power["C"] = id(em_c_power).state;
+            active_power["total"] = id(em_x_power).state;
+
+            apparent_power["A"] = id(em_a_apparent_power).state;
+            apparent_power["B"] = id(em_b_apparent_power).state;
+            apparent_power["C"] = id(em_c_apparent_power).state;
+            apparent_power["total"] = id(em_x_apparent_power).state;
+
+            reactive_power["A"] = id(em_a_reactive_power).state;
+            reactive_power["B"] = id(em_b_reactive_power).state;
+            reactive_power["C"] = id(em_c_reactive_power).state;
+            reactive_power["total"] = id(em_x_reactive_power).state;
+
+            auto voltage = root.createNestedObject("voltage");
+            voltage["A"] = id(em_a_voltage).state;
+            voltage["B"] = id(em_b_voltage).state;
+            voltage["C"] = id(em_c_voltage).state;
+            voltage["average"] = id(em_x_voltage).state;
+
+            auto current = root.createNestedObject("current");
+            current["A"] = id(em_a_current).state;
+            current["B"] = id(em_b_current).state;
+            current["C"] = id(em_c_current).state;
+            current["total"] = id(em_x_current_sum).state;
+            current["average"] = id(em_x_current_avg).state;
+
+  - id: monthly_report
+    then:
+      - lambda: |-
+          auto ts = id(rtc_clock).now();
+
+          if(!ts.is_valid()) {
+            ESP_LOGE("TIME", "Unable to create report on undefined time.");
+            return;
+          };
+
+          if((ts.day_of_month != id(monthly_report_day).state) && (id(monthly_report_day).state <= 28)) {
+            return; //Nothing to do. Not a report day.
+          };
+
+          if((ts.day_of_month < id(monthly_report_day).state) && (id(monthly_report_day).state > 28)) {
+            //Check for months that ends before report day.
+            auto current_month = ts.month;
+            ts.increment_day();
+            if(ts.month == current_month) {
+              return; //Not the last day in the current month. No need to report.
+            }
+          };
+
+          char buffer[256];
+          snprintf(buffer, sizeof(buffer), TG_POWER_CONSUMPTION_PER_MONTH,
+            "${energy_source_name}", id(em_x_total_counter).state);
+          id(tg_bot_publish).execute(
+            std::string(buffer),
+            false
+          );
+
