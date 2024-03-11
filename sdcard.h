@@ -1,18 +1,18 @@
 #pragma once
 
-#include <string>
-#include <SD.h>
-#include <FS.h>
-#include <vfs_api.h>
-#include <esphome/core/time.h>
 #include "csv_strings.h"
+#include <FS.h>
+#include <SD.h>
+#include <esphome/core/time.h>
+#include <string>
+#include <vfs_api.h>
 
 #define SCK = 18
 #define MOSI = 19
 #define MISO = 23
 #define SS = 5
 
-#define MAX_FILE_SIZE 16777216;
+#define MAX_FILE_SIZE 16777216
 #define LOG_PATH "/events"
 #define LOG_ARCHIVE LOG_PATH "/archive"
 #define LOG_FILENAME LOG_PATH "/eventlog.csv"
@@ -20,7 +20,7 @@
 
 namespace sdcard
 {
-  static bool is_file_open{false};
+  static bool is_file_open = false;
 
   bool claim()
   {
@@ -36,13 +36,12 @@ namespace sdcard
     if (!is_file_open)
       return false;
 
+    is_file_open = false;
+
     return true;
   };
 
-  bool can_claim()
-  {
-    return !is_file_open && (SD.cardType() != CARD_NONE);
-  };
+  bool can_claim() { return !is_file_open && (SD.cardType() != CARD_NONE); };
 
   enum DateDirectoryMode
   {
@@ -55,70 +54,138 @@ namespace sdcard
     BY_MONTH_THEN_BY_DAY = 6
   };
 
-#define PLAIN_TEMPLATE_DIR "/%Y-%m-%d" // /2024-02-29/*
-#define BY_YEAR_TEMPLATE_DIR "/%Y"     // /2024/*
-#define BY_MONTH_TEMPLATE_DIR "/%Y-%m" // /2024-02/*
+#define PATH_DELIMITER "/"
+
+#define PLAIN_TEMPLATE_DIR PATH_DELIMITER "%Y-%m-%d" // /2024-02-29/*
+#define BY_YEAR_TEMPLATE_DIR PATH_DELIMITER "%Y"     // /2024/*
+#define BY_MONTH_TEMPLATE_DIR PATH_DELIMITER "%Y-%m" // /2024-02/*
 #define BY_DAY_TEMPLATE_DIR PLAIN_TEMPLATE_DIR
-#define BY_YEAR_THEN_BY_MONTH_TEMPLATE_DIR "/%Y/%m"                // /2024/02/*
-#define BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR "/%Y/%m/%d" // /2024/02/29/*
-#define BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR "/%Y-%m/%d"              // /2024-02/29/*
+#define BY_YEAR_THEN_BY_MONTH_TEMPLATE_DIR PATH_DELIMITER "%Y" PATH_DELIMITER "%m" // /2024/02/*
+#define BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR \
+  PATH_DELIMITER "%Y" PATH_DELIMITER "%m" PATH_DELIMITER "%d"                        // /2024/02/29/*
+#define BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR PATH_DELIMITER "%Y-%m" PATH_DELIMITER "%d" // /2024-02/29/*
 
   const char *EMPTY_STRING = "";
 
-  const char *generate_date_dir_path(esphome::ESPTime time, DateDirectoryMode mode = DateDirectoryMode::PLAIN,
-                                     const char *filename = EMPTY_STRING)
+  size_t date_file(char *buffer, size_t size, esphome::ESPTime time,
+                   DateDirectoryMode mode = DateDirectoryMode::PLAIN,
+                   const char *filename = EMPTY_STRING)
   {
     if (!time.is_valid())
-      return EMPTY_STRING;
-    std::string dirname;
+      return -1;
+
     switch (mode)
     {
     case DateDirectoryMode::PLAIN:
-      dirname = time.strftime(PLAIN_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(PLAIN_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_YEAR:
-      dirname = time.strftime(BY_YEAR_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_YEAR_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_YEAR_THEN_BY_MONTH:
-      dirname = time.strftime(BY_YEAR_THEN_BY_MONTH_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_YEAR_THEN_BY_MONTH_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY:
-      dirname = time.strftime(BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_MONTH:
-      dirname = time.strftime(BY_MONTH_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_MONTH_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_MONTH_THEN_BY_DAY:
-      dirname = time.strftime(BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR).c_str(), filename);
     case DateDirectoryMode::BY_DAY:
-      dirname = time.strftime(BY_DAY_TEMPLATE_DIR);
-      break;
+      return snprintf(buffer, size, "%s/%s", time.strftime(BY_DAY_TEMPLATE_DIR).c_str(), filename);
     default:
-      dirname = "/";
-      break;
+      return snprintf(buffer, size, "/%s", filename);
     }
+  }
 
-    if (filename != EMPTY_STRING)
-    {
-      dirname += "/";
-      dirname += filename;
-    };
-
-    return dirname.c_str();
-  };
-
-  bool ensure_date_dir_path(esphome::ESPTime time, DateDirectoryMode mode = DateDirectoryMode::PLAIN)
+  size_t date_path(char *buffer, size_t size, esphome::ESPTime time,
+                   DateDirectoryMode mode = DateDirectoryMode::PLAIN)
   {
-    auto dirname = generate_date_dir_path(time, mode);
-    if (dirname == EMPTY_STRING)
-      return false;
-    if (SD.exists(dirname))
+    if (!time.is_valid())
+      return -1;
+
+    switch (mode)
+    {
+    case DateDirectoryMode::PLAIN:
+      return time.strftime(buffer, size, PLAIN_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_YEAR:
+      return time.strftime(buffer, size, BY_YEAR_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_YEAR_THEN_BY_MONTH:
+      return time.strftime(buffer, size, BY_YEAR_THEN_BY_MONTH_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY:
+      return time.strftime(buffer, size,
+                           BY_YEAR_THEN_BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_MONTH:
+      return time.strftime(buffer, size, BY_MONTH_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_MONTH_THEN_BY_DAY:
+      return time.strftime(buffer, size, BY_MONTH_THEN_BY_DAY_TEMPLATE_DIR);
+    case DateDirectoryMode::BY_DAY:
+      return time.strftime(buffer, size, BY_DAY_TEMPLATE_DIR);
+    default:
+      return snprintf(buffer, size, "/");
+    }
+  }
+
+  bool ensure_date_dir_path(esphome::ESPTime time,
+                            DateDirectoryMode mode = DateDirectoryMode::PLAIN)
+  {
+
+    std::string dirname;
+    dirname.resize(128);
+    auto sz = date_path(&dirname[0], dirname.size(), time, mode);
+    dirname.resize(sz);
+
+    ESP_LOGI("SD", "Ensure date-dependent path: %s", dirname.c_str());
+    // if (dirname.empty())
+    //   return false;
+    if (SD.exists(dirname.c_str()))
+    {
+      ESP_LOGI("SD", "Directory %s exists.", dirname.c_str());
       return true;
-    return SD.mkdir(dirname) == 1;
+    }
+    else
+    {
+      ESP_LOGI("SD", "Directory %s is not exists, trying to create it.", dirname.c_str());
+      char path[255] = {'\0'}; // Max allowed path in FAT16.
+      size_t path_size = dirname.size();
+      path[0] = dirname[0];
+      if (path_size >= 254)
+      {
+        ESP_LOGE("SD", "Date-dependent path tree is too long.");
+        return false;
+      }
+      if (path[0] != '/')
+      {
+        ESP_LOGE("SD", "Malformed date-dependent path: %s", dirname.c_str());
+        return false;
+      }
+      for (int i = 1; i < path_size; i++)
+      {
+        if ((dirname[i] == '/'))
+        {
+          ESP_LOGI("SD", "Creating path element: %s", &path[0]);
+          if (!SD.mkdir(&path[0]))
+          {
+            ESP_LOGE("SD", "Unable to create date-dependent dir tree element: %s", &path[0]);
+            return false;
+          };
+        };
+        path[i] = dirname[i];
+        if (i == (path_size - 1))
+        {
+          path[i + 1] = '\0';
+          ESP_LOGI("SD", "Creating the last path element: %s", &path[0]);
+          if (!SD.mkdir(&path[0]))
+          {
+            ESP_LOGE("SD", "Unable to create date-dependent dir tree element: %s", &path[0]);
+            return false;
+          };
+          return true;
+        }
+      };
+    };
+    return false;
   };
 
-  bool writeLogfile(esphome::ESPTime time, const char *eventType, const char *category, const char *message)
+  bool writeLogfile(esphome::ESPTime time, const char *eventType,
+                    const char *category, const char *message)
   {
 
     if (!time.is_valid())
@@ -126,6 +193,8 @@ namespace sdcard
 
     if (!SD.exists(LOG_PATH))
     {
+      ESP_LOGW("SD", "Log path not found. Trying to create log directory: %s.",
+               LOG_PATH);
       if (!SD.mkdir(LOG_PATH))
       {
         ESP_LOGE("SD", "Unable to create log directory: %s", LOG_PATH);
@@ -143,6 +212,13 @@ namespace sdcard
 
     bool needHeader = !SD.exists(LOG_FILENAME);
 
+    if (needHeader)
+    {
+      ESP_LOGI("SD Log",
+               "Log file %s not found. Trying to create and empty CSV log.",
+               LOG_FILENAME);
+    }
+
     auto logfile = SD.open(LOG_FILENAME, FILE_APPEND, true);
 
     if (!logfile)
@@ -152,11 +228,18 @@ namespace sdcard
       return false;
     };
 
-    bool needRotate = (logfile.size() - 1024) > MAX_FILE_SIZE;
+    long filesize = 0;
+    filesize = logfile.size();
+    ESP_LOGI("SD Log", "Log file size is %.2f Mb", filesize / 1024.0 / 1024.0);
+
+    bool needRotate = (filesize > 0) && (filesize > MAX_FILE_SIZE);
     if (needRotate)
     {
+      const char *filename = time.strftime(LOG_ROTATE_FILENAME).c_str();
+      ESP_LOGW("SD Log", "Need to rotate log: %s >>> %s.", LOG_FILENAME,
+               filename);
       logfile.close();
-      if (!SD.rename(LOG_FILENAME, time.strftime(LOG_ROTATE_FILENAME).c_str()))
+      if (!SD.rename(LOG_FILENAME, filename))
       {
         ESP_LOGE("SD", "Unable to rotate logfile.");
         free();
@@ -175,7 +258,10 @@ namespace sdcard
     if (needHeader)
       logfile.println(CSV_EVENTLOG_HEADER);
     logfile.printf(CSV_EVENTLOG_DATALINE_FORMAT,
-                   time.strftime(CSV_EVENTLOG_DATE_FORMAT), eventType, category, message);
+                   time.strftime(CSV_EVENTLOG_DATE_FORMAT).c_str(), eventType, category,
+                   message);
+    ESP_LOGI("SD Log", "Log record has been added. Log file size: %.2f Kb",
+             logfile.size() / 1024.0);
     logfile.close();
     return free();
   };
@@ -185,16 +271,19 @@ namespace sdcard
 
     if (!claim())
     {
-      ESP_LOGW("SD", "Unable to remove files in directory %s. SD card is in use.", path);
+      ESP_LOGW("SD", "Unable to remove files in directory %s. SD card is in use.",
+               path);
       return false;
     }
 
-    std::function<bool(const char *)> clear_lambda = [=](const char *path_to_clear)
+    std::function<bool(const char *)> clear_lambda =
+        [=](const char *path_to_clear)
     {
       auto dir = SD.open(path_to_clear);
       if (!dir.isDirectory())
       {
-        ESP_LOGW("SD", "Provided path to clear (%s) is not a directory.", path);
+        ESP_LOGW("SD", "Provided path to clear (%s) is not a directory.",
+                 path);
         return false;
       };
       auto file = dir.openNextFile();
@@ -231,9 +320,6 @@ namespace sdcard
     return free();
   };
 
-  bool deleteArchiveLogs()
-  {
-    return clearDirectory(LOG_ARCHIVE);
-  };
+  bool deleteArchiveLogs() { return clearDirectory(LOG_ARCHIVE); };
 
 }; // namespace sdcard

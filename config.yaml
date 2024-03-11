@@ -45,6 +45,11 @@ esphome:
     priority: 600
     then:
       - ds1307.read_time: rtc_clock
+      - if:
+          condition:
+            - lambda: return id(disable_deep_sleep);
+          then:
+            - deep_sleep.prevent: dsleep
       - lambda: |-
           id(card_available) = SD.begin(5);
           if(!id(card_available)) {
@@ -55,7 +60,15 @@ esphome:
             if(!settings::readSettings()) {
               ESP_LOGE("Settings", "Unable to initialize settings data.");
             }
+            auto counter = id(em_x_total_counter).state;
+            if(counter != NAN) {
+              for(int i = 0; i < sizeof(snapData.data); i++) {
+                snapData.data[i] = id(snapshot_data)[i];
+              };
+              loadFromSnapshot(counter);
+            };
           };
+          sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node is starting...");
           add_on_failure_callback([](Problems problem) { 
             id(process_problem).execute(
               static_cast<int>(problem),
@@ -72,6 +85,32 @@ esphome:
               static_cast<int>(ProblemState::NONE)
               ); });
           id(is_loaded) = true;
+          sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node has been started.");
+  on_shutdown:
+    priority: 400
+    then:
+      - lambda: |-
+          if(!id(is_loaded)) {
+            ESP_LOGE("Node", "Invalid system state. Shutdown is initialized before node has been loaded.");
+            return;
+          };
+
+          if(!id(card_available)) {
+            ESP_LOGW("SD", "Unable to mount SD card.");
+            return;
+          } else {
+            sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node will be shutted down (deep sleep or connectivity loss).");
+            saveToSnapshot(id(em_x_total_counter).state);
+            for(int i = 0; i < sizeof(snapData.data); i++) {
+              id(snapshot_data)[i] = snapData.data[i];
+            };
+            ESP_LOGD("Settings", "Saving settings to SD Card...");
+            if(!settings::writeSettings()) {
+              ESP_LOGE("Settings", "Unable to initialize settings data.");
+            }
+          };
+          sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Gracefully shut down.");
+
 
 esp32:
   board: esp32dev
@@ -81,6 +120,7 @@ esp32:
     platform_version: 6.5.0
 
 logger:
+  level: INFO
 
 dallas:
   - pin: GPIO14
@@ -91,24 +131,85 @@ api:
     key: !secret enc_key
   reboot_timeout: 30s
   services:
+    - service: csv_test
+      variables:
+        test_case: int
+      then:
+        - lambda: |-
+            switch(test_case) {
+              case 1:
+                writeDailyLog(id(rtc_clock).utcnow());
+                break;
+              case 2:
+                sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "TEST, test, TeSt");
+                break;
+              case 0:
+              default:
+                const char* sdpath_1 = "/test/1";
+                const char* sdpath_2 = "/xs";
+                if(!SD.exists(sdpath_1)) {
+                  ESP_LOGW("SD", "Directory %s is not exist.", sdpath_1);
+                  SD.mkdir(sdpath_1);
+                  if(SD.exists(sdpath_1))
+                    ESP_LOGW("SD", "Created %s", sdpath_1);
+                } else {
+                  ESP_LOGW("SD", "Directory %s is exist.", sdpath_1);
+                }
+                if(!SD.exists(sdpath_2)) {
+                  ESP_LOGW("SD", "Directory %s is not exist.", sdpath_2);
+                  SD.mkdir(sdpath_2);
+                  if(SD.exists(sdpath_2))
+                    ESP_LOGW("SD", "Created %s", sdpath_2);
+                } else {
+                  ESP_LOGW("SD", "Directory %s is exist.", sdpath_2);
+                }
+                std::string sdpath_3("/2023/05");
+                if(!SD.exists(sdpath_3.c_str())) {
+                  ESP_LOGW("SD", "Directory %s is not exist.", sdpath_3.c_str());
+                  SD.mkdir(sdpath_3.c_str());
+                  if(SD.exists(sdpath_3.c_str()))
+                    ESP_LOGW("SD", "Created %s", sdpath_3.c_str());
+                } else {
+                  ESP_LOGW("SD", "Directory %s is exist.", sdpath_3.c_str());
+                }
+                break;
+            }
     - service: tg_test_bot
       variables: 
         data_to_test: int
       then:
         - lambda: |-
+            std::string message;
+            int msg_length;
             switch(data_to_test) {
               case 1:
                 saveToSnapshot(id(em_x_total_counter).state);
+                message = generateTelegramBotSummary_1("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
+                ESP_LOGI("Telegram", message.c_str());
                 id(tg_bot_publish).execute(
-                  generateTelegramBotSummaryMessage("${energy_source_name} - Test", "${ha_url}", "${grafana_url}"),
+                  message.c_str(),
+                  false
+                );
+                message = generateTelegramBotSummary_2("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
+                ESP_LOGI("Telegram", message.c_str());
+                id(tg_bot_publish).execute(
+                  message.c_str(),
+                  false
+                );
+                message = generateTelegramBotSummary_3("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
+                ESP_LOGI("Telegram", message.c_str());
+                id(tg_bot_publish).execute(
+                  message.c_str(),
                   false
                 );
                 break;
               case 2:
                 saveToSnapshot(id(em_x_total_counter).state);
                 for(int i = 0; i < PROBLEMS_COUNT; i++) {
+                  message = generateProblemMessage("${energy_source_name} - Test", static_cast<Problems>(i), ProblemState::NONE, -1);
+                  ESP_LOGW("Telegram", message.c_str());
                   id(tg_bot_publish).execute(
-                    generateProblemMessage("${energy_source_name} - Test", static_cast<Problems>(i), -1),
+                    message.c_str(),
                     false
                   );
                 };
@@ -142,8 +243,51 @@ api:
         - lambda: 
             sdcard::deleteArchiveLogs();
             sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Logs archive folder has been cleared.");
-            
-
+    - service: init_snapshot
+      variables:
+        code: string
+      then:
+        - lambda: |-
+            if(code == "$case_pincode") {
+              resetCounters();
+              clearSnapshotData(id(rtc_clock).utcnow().timestamp);
+              for(int i = 0; i < sizeof(snapData.data); i++) {
+                id(snapshot_data)[i] = snapData.data[i];
+              };
+              ESP_LOGW("Snap data", "Snapshot data has been cleared out:");
+              for(int j = 0; j < 64; j++) {
+                ESP_LOGW("Snap data", "%02x %02x %02x %02x %02x %02x %02x %02x",
+                  id(snapshot_data)[j * 8 + 0],
+                  id(snapshot_data)[j * 8 + 1],
+                  id(snapshot_data)[j * 8 + 2],
+                  id(snapshot_data)[j * 8 + 3],
+                  id(snapshot_data)[j * 8 + 4],
+                  id(snapshot_data)[j * 8 + 5],
+                  id(snapshot_data)[j * 8 + 6],
+                  id(snapshot_data)[j * 8 + 7]
+                  );
+              }
+              sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Snapshot data has been cleared.");
+            } else {
+              sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_FAIL, LOG_CATEGORY_NODE, "Authentification Failed - invalid pincode provided.");
+            }
+    - service: read_snapshot
+      variables:
+        code: string
+      then:
+        - lambda: |-
+            for(int j = 0; j < 64; j++) {
+              ESP_LOGW("Snap data", "%02x %02x %02x %02x %02x %02x %02x %02x",
+                id(snapshot_data)[j * 8 + 0],
+                id(snapshot_data)[j * 8 + 1],
+                id(snapshot_data)[j * 8 + 2],
+                id(snapshot_data)[j * 8 + 3],
+                id(snapshot_data)[j * 8 + 4],
+                id(snapshot_data)[j * 8 + 5],
+                id(snapshot_data)[j * 8 + 6],
+                id(snapshot_data)[j * 8 + 7]
+                );
+            }
 
 mqtt:
   broker: !secret mqtt_broker
@@ -190,9 +334,21 @@ time:
         - ds1307.write_time:
 
 globals:
+# variables to store in ESP32 memory
+
 # snapshot data
   - id: snapshot_data
     type: uint8_t[512]
+    restore_value: true
+# state of case intrusion
+  - id: is_armed
+    type: boolean
+    initial_value: 'true'
+    restore_value: true
+# state of deep sleep logic
+  - id: disable_deep_sleep
+    type: boolean
+    initial_value: 'true'
     restore_value: true
 
 # common data
@@ -205,10 +361,9 @@ globals:
   - id: card_available
     type: boolean
     initial_value: 'false'
-  - id: is_armed
-    type: boolean
-    initial_value: 'true'
-    restore_value: true
+  - id: http_code
+    type: int
+    initial_value: '-1'
 
 deep_sleep:
   run_duration: 
@@ -216,6 +371,13 @@ deep_sleep:
     default: 30s
   sleep_duration: 10min
   id: dsleep 
+  esp32_ext1_wakeup:
+    pins: 
+      - number: GPIO27
+        inverted: true
+        allow_other_uses: true
+    mode: ANY_HIGH
+  wakeup_pin_mode: KEEP_AWAKE
 
 output:
   - platform: gpio
@@ -306,10 +468,6 @@ sensor:
     device_class: "energy"
     accuracy_decimals: 3
     icon: mdi:meter-electric-outline
-    # on_value:
-    #   then:
-    #     - lambda: |-
-    #         snapData.content.dataset.totalData.energyConsumption = x;
 
   # Power
   - platform: modbus_controller
@@ -860,13 +1018,15 @@ binary_sensor:
     on_state:
       then:
         - lambda: |-
-            // monitorPowerFailure(x);
+            monitorPowerFailure(x);
   - platform: gpio
     pin: GPIO35
     name: "Power Protection Failure"
     device_class: problem
     icon: mdi:transmission-tower-off
     id: power_input_protection_failure
+    filters:
+      - delayed_on_off: 0.5s
     on_state:
       then:
         - lambda: |-
@@ -875,14 +1035,16 @@ binary_sensor:
     pin: 
       number: GPIO27
       inverted: true
+      allow_other_uses: true
     name: "UPS AC State"
     id: ups_ac_state
     icon: mdi:power-plug
+    filters:
+      - delayed_on_off: 0.5s
     on_state:
       then:
         - lambda: |-
             monitorACLineFailure(x);
-            monitorPowerFailure(x);
   - platform: gpio
     pin: 
       number: GPIO33
@@ -891,6 +1053,8 @@ binary_sensor:
     name: "UPS Battery State"
     id: ups_battery_state
     icon: mdi:battery-alert-variant-outline
+    filters:
+      - delayed_on_off: 0.5s
     on_state:
       then:
         - lambda: |-
@@ -903,6 +1067,8 @@ binary_sensor:
     id: case_open
     icon: mdi:shield-lock-open
     device_class: door
+    filters:
+      - delayed_on_off: 0.5s
     on_state:
       then:
         - lambda: |-
@@ -928,7 +1094,7 @@ number:
             } else {
               settings::settingsData.content.settings.undervoltageWarningLevel = x;
             }; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Undervoltage Failure Level"
     id: conf_undervoltage_fail_lvl
@@ -948,7 +1114,7 @@ number:
             } else {
               settings::settingsData.content.settings.undervoltageFailureLevel = x;
             };
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Overvoltage Warning Level"
     id: conf_overvoltage_warn_lvl
@@ -968,7 +1134,7 @@ number:
             } else {
               settings::settingsData.content.settings.overvoltageWarningLevel = x;
             }; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Overvoltage Failure Level"
     id: conf_overvoltage_fail_lvl
@@ -988,7 +1154,7 @@ number:
             } else {
               settings::settingsData.content.settings.overvoltageFailureLevel = x;
             };
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Phase Disbalance Warning Level"
     id: phase_shift_warn_lvl
@@ -1003,7 +1169,7 @@ number:
       then:
         - lambda: |-
             settings::settingsData.content.settings.phaseShiftWarningLevel = x; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Phase Disbalance Critical Level"
     id: phase_shift_fail_lvl
@@ -1018,7 +1184,7 @@ number:
       then:
         - lambda: |-
             settings::settingsData.content.settings.phaseShiftFailureLevel = x; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Overload Warning Level"
     id: overload_warn_lvl
@@ -1033,7 +1199,7 @@ number:
       then:
         - lambda: |-
             settings::settingsData.content.settings.overloadWarningLevel = x; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Overload Critical Level"
     id: overload_fail_lvl
@@ -1048,7 +1214,7 @@ number:
       then:
         - lambda: |-
             settings::settingsData.content.settings.overloadFailureLevel = x; 
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
   - platform: template
     name: "Monthly Report Day"
     id: monthly_report_day
@@ -1063,7 +1229,7 @@ number:
         - lambda: |-
             settings::settingsData.content.settings.monthlyReportDay =
               static_cast<int>(x);
-            settings::writeSettings();
+            if(id(is_loaded)) { settings::writeSettings(); };
 
 light:
   - platform: binary
@@ -1114,8 +1280,8 @@ select:
     id: gateway_control_behavior
     icon: mdi:gate-open
     options:
-      - Always On
-      - Enabled When Online
+      - Follow Node Power
+      - Follow Home Power
       - Disabled
     entity_category: "CONFIG"
     lambda: |-
@@ -1129,30 +1295,32 @@ select:
           else
             settings::settingsData.content.settings.gatewayNodePowerPolicy
               = 0;
-          settings::writeSettings();
-          if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE) {
-            switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
-            case 2:
-              id(power_control_pin).turn_off();
-              break;
-            case 0: //Always on
-            case 1: //Enabled when online
-            default:
-              id(power_control_pin).turn_on();
-              break;
-            }
-          } else {
-            switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
-              case 1: //Enabled when online
-              case 2: //Disabled
+          if(id(is_loaded)) { settings::writeSettings(); };
+          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 0: // Child node will be disabled when this Node UPS is offline.
+              if(getProblem(Problems::AC_LINE) != ProblemState::NONE) {
                 id(power_control_pin).turn_off();
-                break;
-              case 0: //Always on
-              default:
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Node UPS is offline).");
+              } else {
                 id(power_control_pin).turn_on();
-                break;
-            }
-          };
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Node UPS is online).");
+              };
+              break;
+            case 1: // Child node will be disabled when whole home is off the grid.
+              if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE) {
+                id(power_control_pin).turn_off();
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Generic Power Failure).");
+              } else {
+                id(power_control_pin).turn_on();
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Generic Power Failure fixed).");
+              };
+              break;
+            case 2: // Child node will be always disabled
+            default:
+              id(power_control_pin).turn_off();
+              ESP_LOGI("Gateway Control", "Nested node is switched OFF (Manual Control).");
+              break;
+          }
 
 switch:
   - platform: template
@@ -1165,11 +1333,33 @@ switch:
     turn_on_action:
       - lambda: |- 
           settings::settingsData.content.settings.publishSummary = true;
-          settings::writeSettings();
+          if(id(is_loaded)) { settings::writeSettings(); };
     turn_off_action:
       - lambda: |- 
           settings::settingsData.content.settings.publishSummary = false;
-          settings::writeSettings();
+          if(id(is_loaded)) { settings::writeSettings(); };
+  - platform: template
+    name: "Prevent Deep Sleep mode"
+    entity_category: "CONFIG"
+    icon: mdi:sleep-off
+    lambda: return id(disable_deep_sleep);
+    turn_on_action:
+      - if:
+          condition:
+            lambda: return id(is_loaded);
+          then:
+            - lambda: |- 
+                id(disable_deep_sleep) = true;
+            - deep_sleep.prevent: dsleep
+    turn_off_action:
+      - if:
+          condition:
+            lambda: return id(is_loaded);
+          then:
+            - lambda: |- 
+                id(disable_deep_sleep) = false;
+            - deep_sleep.allow: dsleep
+
 
 button:
   - platform: template
@@ -1177,8 +1367,11 @@ button:
     icon: mdi:reload-alert
     on_press:
       - lambda: settings::resetSettings(true);
+    entity_category: "CONFIG"
   - platform: restart
     name: "Reboot Node"
+    entity_category: "CONFIG"
+
 
 interval:
   - interval: 1s
@@ -1210,17 +1403,40 @@ script:
     then:
       - lambda: |-
           saveToSnapshot(id(em_x_total_counter).state);
-          memcpy(id(snapshot_data), snapData.data, sizeof(snapData.data));
+          for(int i = 0; i < sizeof(snapData.data); i++) {
+            id(snapshot_data)[i] = snapData.data[i];
+          };
 
   - id: load_snapshot
     mode: single
     then:
       - lambda: |-
-          memcpy(snapData.data, id(snapshot_data), sizeof(snapData.data));
+          for(int i = 0; i < sizeof(snapData.data); i++) {
+            snapData.data[i] = id(snapshot_data)[i];
+          };
           loadFromSnapshot(id(em_x_total_counter).state);
 
   - id: tg_bot_publish
     mode: queued
+    parameters:
+      message: string
+      silent: boolean
+    then:
+      - lambda: |-
+          id(http_code) = -1;
+          id(tg_bot_publish_int)->execute(message.c_str(), silent);
+      - wait_until:
+          not:
+            script.is_running: tg_bot_publish_int
+      - lambda: |-
+          int http_result = id(http_code);
+          if((http_result < 200) || (http_result >= 400)) {
+            ESP_LOGE("HTTP", "Unable to send request to TG API. Code: %d. Trying to send it once more time...", http_result);
+            id(tg_bot_publish_int)->execute(message.c_str(), silent);
+          };
+      
+  - id: tg_bot_publish_int
+    mode: single
     parameters:
       message: string
       silent: boolean
@@ -1231,10 +1447,12 @@ script:
             Content-Type: application/json
           json:
             chat_id: ${tg_chat_id}
-            text: !lambda return message;
-            parse_mode: "MarkdownV2"
+            text: !lambda return message.c_str();
+            parse_mode: "HTML"
             disable_notification: !lambda if(silent) { return "true"; } else { return "false"; };
           verify_ssl: false
+          on_response:
+            - lambda: id(http_code) = status_code;
 
   - id: process_problem
     mode: queued
@@ -1264,6 +1482,9 @@ script:
           if(!id(is_loaded))
             return;
           saveToSnapshot(id(em_x_total_counter).state);
+          for(int i = 0; i < sizeof(snapData.data); i++) {
+            id(snapshot_data)[i] = snapData.data[i];
+          };
           double value = NAN;
           switch(problem_type) {
             case Problems::UNDERVOLTAGE:
@@ -1290,14 +1511,52 @@ script:
                 id(power_restore).execute();
               };
               break;
+            case Problems::AC_LINE:
+              if(problem_state != ProblemState::NONE) {
+                id(ups_offline).execute();
+              } else {
+                id(ups_online).execute();
+              };
+              break;
             default:
               break;
           };
           id(tg_bot_publish).execute(
-            generateProblemMessage("${energy_source_name}", static_cast<Problems>(problem_type), value),
+            generateProblemMessage("${energy_source_name}",
+              static_cast<Problems>(problem_type),
+              static_cast<ProblemState>(problem_state),
+              value),
             false
           );
-
+      - lambda: |-
+          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 0: // Child node will be disabled when this Node UPS is offline.
+              if((problem_type == Problems::AC_LINE) &&
+                   (problem_state != ProblemState::NONE)) {
+                id(power_control_pin).turn_off();
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Node UPS is offline).");
+              } else {
+                id(power_control_pin).turn_on();
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Node UPS is online).");
+              };
+              break;
+            case 1: // Child node will be disabled when whole home is off the grid.
+              if((problem_type == Problems::GENERIC_POWER_FAILURE) &&
+                   (problem_state != ProblemState::NONE)) {
+                id(power_control_pin).turn_off();
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Generic Power Failure).");
+              } else {
+                id(power_control_pin).turn_on();
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Generic Power Failure fixed).");
+              };
+              break;
+            case 2: // Child node will be always disabled
+            default:
+              id(power_control_pin).turn_off();
+              ESP_LOGI("Gateway Control", "Nested node is switched OFF (Manual Control).");
+              break;
+          }
+      - lambda: |-
           switch(problem_state) {
             case ProblemState::NONE:
               sdcard::writeLogfile(
@@ -1344,33 +1603,47 @@ script:
           if(settings::settingsData.content.settings.publishSummary) {
             ESP_LOGI(TAG_SNAPSHOT, "Trying to publish summary to Telegram bot.");
             id(tg_bot_publish).execute(
-              generateTelegramBotSummaryMessage("${energy_source_name}", "${ha_url}", "${grafana_url}"),
+              generateTelegramBotSummary_1("${energy_source_name}", "${ha_url}", "${grafana_url}"),
+              true);
+            id(tg_bot_publish).execute(
+              generateTelegramBotSummary_2("${energy_source_name}", "${ha_url}", "${grafana_url}", id(rtc_clock).utcnow().timestamp),
+              true);
+            id(tg_bot_publish).execute(
+              generateTelegramBotSummary_3("${energy_source_name}", "${ha_url}", "${grafana_url}"),
               true);
           };
           commitDailyData(current_counter, id(rtc_clock).utcnow().timestamp); //Resetting snapshot data to brand new day.
           resetCounters(); // Resetting problem counters.
           saveToSnapshot(current_counter); //Using brand new day data in snapshot.
-          memcpy(id(snapshot_data), snapData.data, sizeof(snapData.data));
+          for(int i = 0; i < sizeof(snapData.data); i++) {
+            id(snapshot_data)[i] = snapData.data[i];
+          };
+
+  - id: ups_online
+    mode: single
+    then:
+      - deep_sleep.prevent: dsleep
+      - script.execute: 
+          id: load_snapshot
+  
+  - id: ups_offline
+    mode: single
+    then:
+      - script.execute:
+          id: save_snapshot
+      - delay: 2s
+      - if:
+          condition:
+            - lambda: return !id(disable_deep_sleep);
+          then:
+            - deep_sleep.allow: dsleep
 
   - id: power_restore
     mode: single
     then: 
-      - deep_sleep.prevent:
       - mqtt.publish:
           topic: Infra/Energy/Sources/${energy_source_name}/Active
           payload: "true"
-      - delay: 5s
-      - lambda: |-
-          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
-            case 2:
-              id(power_control_pin).turn_off();
-              break;
-            case 0: //Always on
-            case 1: //Enabled when online
-            default:
-              id(power_control_pin).turn_on();
-              break;
-          };
 
   - id: power_fail
     mode: single
@@ -1378,19 +1651,6 @@ script:
       - mqtt.publish:
           topic: Infra/Energy/Sources/${energy_source_name}/Active
           payload: "false"
-      - delay: 5s
-      - lambda: |-
-          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
-            case 1: //Enabled when online
-            case 2: //Disabled
-              id(power_control_pin).turn_off();
-              break;
-            case 0: //Always on
-            default:
-              id(power_control_pin).turn_on();
-              break;
-          };
-      - deep_sleep.allow:
 
   - id: power_monitor
     mode: queued
@@ -1435,6 +1695,32 @@ script:
             current["C"] = id(em_c_current).state;
             current["total"] = id(em_x_current_sum).state;
             current["average"] = id(em_x_current_avg).state;
+      - lambda: |-
+          switch(settings::settingsData.content.settings.gatewayNodePowerPolicy) {
+            case 0: // Child node will be disabled when this Node UPS is offline.
+              if(getProblem(Problems::AC_LINE) != ProblemState::NONE) {
+                id(power_control_pin).turn_off();
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Node UPS is offline).");
+              } else {
+                id(power_control_pin).turn_on();
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Node UPS is online).");
+              };
+              break;
+            case 1: // Child node will be disabled when whole home is off the grid.
+              if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE) {
+                id(power_control_pin).turn_off();
+                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Generic Power Failure).");
+              } else {
+                id(power_control_pin).turn_on();
+                ESP_LOGI("Gateway Control", "Nested node is switched ON (Generic Power Failure fixed).");
+              };
+              break;
+            case 2: // Child node will be always disabled
+            default:
+              id(power_control_pin).turn_off();
+              ESP_LOGI("Gateway Control", "Nested node is switched OFF (Manual Control).");
+              break;
+          }
 
   - id: monthly_report
     then:
@@ -1463,7 +1749,7 @@ script:
           snprintf(buffer, sizeof(buffer), TG_POWER_CONSUMPTION_PER_MONTH,
             "${energy_source_name}", id(em_x_total_counter).state);
           id(tg_bot_publish).execute(
-            std::string(buffer),
+            std::string(buffer).c_str(),
             false
           );
 

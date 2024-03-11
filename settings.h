@@ -15,7 +15,7 @@
 
 #define TAG_SETTINGS "Settings"
 
-#define SETTINGS_FILE "settings.dat"
+#define SETTINGS_FILE "/settings.dat"
 
 namespace settings
 {

@@ -3,7 +3,7 @@
 #define CSV_DELIMITER ";"
 
 #define CSV_SUMMARY_DATE_FORMAT "%Y-%m-%d"
-#define CSV_EVENTLOG_DATE_FORMAT "%Y-%m-d %H:%M:%S"
+#define CSV_EVENTLOG_DATE_FORMAT "%Y-%m-%d %H:%M:%S"
 
 #define CSV_SUMMARY_DATE "date"
 #define CSV_SUMMARY_CONSUMPTION_PER_DAY "consumption_per_day"

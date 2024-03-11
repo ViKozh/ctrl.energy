@@ -118,45 +118,39 @@ void setProblem(Problems problem, ProblemState state = ProblemState::NONE,
   auto prev_ = problems[idx];
   if (prev_ == state)
     return;
-  if ((prev_ == ProblemState::WARNING) && (state == ProblemState::FAILURE))
+
+  switch (state)
   {
-    dailyWarnings[idx] = dailyWarnings[idx] - 1;
+  case ProblemState::WARNING:
+    dailyWarnings[idx] = dailyWarnings[idx] + 1;
+    problem_warning_callback.call(problem);
+    break;
+  case ProblemState::FAILURE:
     dailyFailures[idx] = dailyFailures[idx] + 1;
-  }
-  else
-  {
-    switch (state)
+    if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid())
     {
-    case ProblemState::WARNING:
-      dailyWarnings[idx] = dailyWarnings[idx] + 1;
-      problem_warning_callback.call(problem);
-      break;
-    case ProblemState::FAILURE:
-      dailyFailures[idx] = dailyFailures[idx] + 1;
-      if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid())
-      {
-        powerFailureShiftingStartTS = time.timestamp;
-        powerFailureStartTS = time.timestamp;
-        lastPowerFailureDuration = -1;
-        powerFailureEndTS = 0;
-      };
-      problem_failure_callback.call(problem);
-      break;
-    case ProblemState::NONE:
-      if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid() &&
-          powerFailureStartTS != 0)
-      {
-        powerFailureEndTS = time.timestamp;
-        lastPowerFailureDuration = powerFailureEndTS - powerFailureShiftingStartTS;
-        dailyPowerFailureDuration +=
-            static_cast<int>((powerFailureEndTS - powerFailureStartTS));
-      }
-      problem_restore_callback.call(problem);
-      break;
-    default:
-      break;
+      powerFailureShiftingStartTS = time.timestamp;
+      powerFailureStartTS = time.timestamp;
+      lastPowerFailureDuration = -1;
+      powerFailureEndTS = 0;
+    };
+    problem_failure_callback.call(problem);
+    break;
+  case ProblemState::NONE:
+    if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid() &&
+        powerFailureStartTS != 0)
+    {
+      powerFailureEndTS = time.timestamp;
+      lastPowerFailureDuration = powerFailureEndTS - powerFailureShiftingStartTS;
+      dailyPowerFailureDuration +=
+          static_cast<int>((powerFailureEndTS - powerFailureStartTS));
     }
+    problem_restore_callback.call(problem);
+    break;
+  default:
+    break;
   }
+
   problems[static_cast<int>(problem)] = state;
 };
 
@@ -349,9 +343,9 @@ const char *getProblemState(Problems problem)
   return STATE_NAMES.at(getProblem(problem));
 };
 
-std::string generatePowerFailureMessage(const char *sourceName)
+std::string generatePowerFailureMessage(const char *sourceName, ProblemState state)
 {
-  if (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  if (state != ProblemState::NONE)
   {
     char buffer[512];
     snprintf(buffer, sizeof(buffer), TG_POWER_FAIL,
@@ -375,20 +369,20 @@ std::string generatePowerFailureMessage(const char *sourceName)
   }
 };
 
-std::string generateProblemMessage(const char *sourceName, Problems problem, double value = NAN)
+std::string generateProblemMessage(const char *sourceName, Problems problem, ProblemState state, double value = NAN)
 {
   char buffer[255];
   switch (problem)
   {
   case Problems::GENERIC_POWER_FAILURE:
-    return generatePowerFailureMessage(sourceName);
+    return generatePowerFailureMessage(sourceName, state);
   case Problems::FREQUENCY_SHIFT:
   case Problems::OVERHEAT:
   case Problems::OVERLOAD:
   case Problems::OVERVOLTAGE:
   case Problems::PHASE_SHIFT:
   case Problems::UNDERVOLTAGE:
-    switch (getProblem(problem))
+    switch (state)
     {
     case ProblemState::NONE:
       snprintf(buffer, sizeof(buffer), TG_RESTORE_MESSAGE_WITH_VALUE,
@@ -418,7 +412,7 @@ std::string generateProblemMessage(const char *sourceName, Problems problem, dou
   case Problems::POWER_METER:
   case Problems::INTRUSION:
   default:
-    switch (getProblem(problem))
+    switch (state)
     {
     case ProblemState::NONE:
       snprintf(buffer, sizeof(buffer), TG_RESTORE_MESSAGE,
