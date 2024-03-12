@@ -1,10 +1,16 @@
 #pragma once
 
-#include <ArduinoJson.h>
+#define USE_SD_CARD_NO
+
 #include <esphome/core/helpers.h>
+
+#ifdef USE_SD_CARD
+
 #include <SD.h>
 #include <FS.h>
 #include "sdcard.h"
+
+#endif
 
 
 #define VOLTAGE_LEVEL 230
@@ -19,6 +25,8 @@
 
 namespace settings
 {
+
+
     struct NodeSettings {
         float undervoltageWarningLevel;
         float undervoltageFailureLevel;
@@ -50,8 +58,10 @@ namespace settings
 
     static NodeSettingsBinary settingsData{};
 
+
 //    NodeSettings settings() { return &settingsData.content; };
 
+#ifdef USE_SD_CARD
     /* Writes settings to SD card */
     bool writeSettings()
     {
@@ -87,6 +97,28 @@ namespace settings
 
         return true;
     }    
+#else
+
+    unsigned char *storage{nullptr};
+
+    bool writeSettings() {
+        if(storage == nullptr)
+        {
+            ESP_LOGE(TAG_SETTINGS, "Settings storage variable is not defined. Please assert uint8_t array global to 'storage' pointer.");
+            return false;
+        }
+
+        settingsData.content.hash = esphome::crc16(settingsData.content.data, sizeof(settingsData.content.data));
+        ESP_LOGD(TAG_SETTINGS, "Settings CRC is %0x", settingsData.content.hash);
+        for (size_t i = 0; i < sizeof(settingsData.data); i++)
+        {
+            storage[i] = settingsData.data[i];
+        }
+
+        ESP_LOGI(TAG_SETTINGS, "Settings has been saved to internal memory.");
+        return true;        
+    }
+#endif
 
     /* Reset settings to default and optionally saves it to sd card. */
     bool resetSettings(bool saveFile = false){
@@ -111,6 +143,7 @@ namespace settings
             return true;
     }
 
+#ifdef USE_SD_CARD
     /* Reads settings from sd card */
     bool readSettings()
     {
@@ -162,7 +195,35 @@ namespace settings
 
         return true;
     }
+#else
+    bool readSettings() {
+        if(storage == nullptr)
+        {
+            ESP_LOGE(TAG_SETTINGS, "Settings storage variable is not defined. Please assert uint8_t array global to 'storage' pointer.");
+            return false;
+        }
 
+        NodeSettingsBinary loaded{};
+
+        for (size_t i = 0; i < sizeof(settingsData.data); i++)
+        {
+            loaded.data[i] = storage[i];
+        }
+
+        uint16_t loaded_crc = esphome::crc16(loaded.content.data, sizeof(loaded.content.data));
+        if(loaded_crc != loaded.content.hash)
+        {
+            ESP_LOGE(TAG_SETTINGS, "Invalid checksum. Settings file is corrupted. Using default values.");
+            return resetSettings(true);
+        }
+
+        memcpy(settingsData.data, loaded.data, sizeof(loaded.data));
+
+        ESP_LOGI(TAG_SETTINGS, "Settings has been read from internal memory.");
+        return true;
+    }
+
+#endif
 } // namespace settings
 
 

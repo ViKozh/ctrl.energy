@@ -52,23 +52,28 @@ esphome:
             - deep_sleep.prevent: dsleep
       - lambda: |-
           id(card_available) = SD.begin(5);
+
           if(!id(card_available)) {
             ESP_LOGW("SD", "Unable to mount SD card.");
-            return;
           } else {
-            ESP_LOGD("Settings", "Loading settings...");
-            if(!settings::readSettings()) {
-              ESP_LOGE("Settings", "Unable to initialize settings data.");
-            }
-            auto counter = id(em_x_total_counter).state;
-            if(counter != NAN) {
-              for(int i = 0; i < sizeof(snapData.data); i++) {
-                snapData.data[i] = id(snapshot_data)[i];
-              };
-              loadFromSnapshot(counter);
+            sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node is starting...");
+          }
+
+          settings::storage = &id(system_settings)[0];
+          ESP_LOGD("Settings", "Loading settings...");
+          if(!settings::readSettings()) {
+            ESP_LOGE("Settings", "Unable to initialize settings data.");
+          }
+          
+
+          auto counter = id(em_x_total_counter).state;
+          if(counter != NAN) {
+            for(int i = 0; i < sizeof(snapData.data); i++) {
+              snapData.data[i] = id(snapshot_data)[i];
             };
+            loadFromSnapshot(counter);
           };
-          sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node is starting...");
+          
           add_on_failure_callback([](Problems problem) { 
             id(process_problem).execute(
               static_cast<int>(problem),
@@ -84,8 +89,13 @@ esphome:
               static_cast<int>(problem),
               static_cast<int>(ProblemState::NONE)
               ); });
+
+          if(!id(card_available)) {
+            ESP_LOGW("SD", "Unable to mount SD card.");
+          } else {
+            sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node has been started.");
+          }
           id(is_loaded) = true;
-          sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node has been started.");
   on_shutdown:
     priority: 400
     then:
@@ -106,7 +116,7 @@ esphome:
             };
             ESP_LOGD("Settings", "Saving settings to SD Card...");
             if(!settings::writeSettings()) {
-              ESP_LOGE("Settings", "Unable to initialize settings data.");
+              ESP_LOGE("Settings", "Unable to save settings data.");
             }
           };
           sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Gracefully shut down.");
@@ -185,19 +195,19 @@ api:
               case 1:
                 saveToSnapshot(id(em_x_total_counter).state);
                 message = generateTelegramBotSummary_1("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
-                ESP_LOGI("Telegram", message.c_str());
+                ESP_LOGD("Telegram", message.c_str());
                 id(tg_bot_publish).execute(
                   message.c_str(),
                   false
                 );
                 message = generateTelegramBotSummary_2("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
-                ESP_LOGI("Telegram", message.c_str());
+                ESP_LOGD("Telegram", message.c_str());
                 id(tg_bot_publish).execute(
                   message.c_str(),
                   false
                 );
                 message = generateTelegramBotSummary_3("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
-                ESP_LOGI("Telegram", message.c_str());
+                ESP_LOGD("Telegram", message.c_str());
                 id(tg_bot_publish).execute(
                   message.c_str(),
                   false
@@ -207,7 +217,7 @@ api:
                 saveToSnapshot(id(em_x_total_counter).state);
                 for(int i = 0; i < PROBLEMS_COUNT; i++) {
                   message = generateProblemMessage("${energy_source_name} - Test", static_cast<Problems>(i), ProblemState::NONE, -1);
-                  ESP_LOGW("Telegram", message.c_str());
+                  ESP_LOGD("Telegram", message.c_str());
                   id(tg_bot_publish).execute(
                     message.c_str(),
                     false
@@ -254,9 +264,9 @@ api:
               for(int i = 0; i < sizeof(snapData.data); i++) {
                 id(snapshot_data)[i] = snapData.data[i];
               };
-              ESP_LOGW("Snap data", "Snapshot data has been cleared out:");
+              ESP_LOGI("Snap data", "Snapshot data has been cleared out.");
               for(int j = 0; j < 64; j++) {
-                ESP_LOGW("Snap data", "%02x %02x %02x %02x %02x %02x %02x %02x",
+                ESP_LOGD("Snap data", "%02x %02x %02x %02x %02x %02x %02x %02x",
                   id(snapshot_data)[j * 8 + 0],
                   id(snapshot_data)[j * 8 + 1],
                   id(snapshot_data)[j * 8 + 2],
@@ -270,23 +280,6 @@ api:
               sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Snapshot data has been cleared.");
             } else {
               sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_FAIL, LOG_CATEGORY_NODE, "Authentification Failed - invalid pincode provided.");
-            }
-    - service: read_snapshot
-      variables:
-        code: string
-      then:
-        - lambda: |-
-            for(int j = 0; j < 64; j++) {
-              ESP_LOGW("Snap data", "%02x %02x %02x %02x %02x %02x %02x %02x",
-                id(snapshot_data)[j * 8 + 0],
-                id(snapshot_data)[j * 8 + 1],
-                id(snapshot_data)[j * 8 + 2],
-                id(snapshot_data)[j * 8 + 3],
-                id(snapshot_data)[j * 8 + 4],
-                id(snapshot_data)[j * 8 + 5],
-                id(snapshot_data)[j * 8 + 6],
-                id(snapshot_data)[j * 8 + 7]
-                );
             }
 
 mqtt:
@@ -350,6 +343,9 @@ globals:
     type: boolean
     initial_value: 'true'
     restore_value: true
+  - id: system_settings
+    type: uint8_t[256]
+    restore_value: true
 
 # common data
   - id: is_loaded
@@ -381,7 +377,11 @@ deep_sleep:
 
 output:
   - platform: gpio
-    pin: GPIO32
+    pin:
+      number: GPIO32
+      mode: 
+        output: true
+        pulldown: true
     id: power_control_pin
   - platform: gpio
     pin: GPIO25
@@ -1288,7 +1288,8 @@ select:
       return id(gateway_control_behavior).at(settings::settingsData.content.settings.gatewayNodePowerPolicy);
     set_action:
       - lambda: |-
-          auto aidx = id(gateway_control_behavior).active_index();
+          auto aidx = id(gateway_control_behavior).index_of(x);
+          ESP_LOGI("Gateway Control", "Active option index is %d.", aidx.has_value() ? aidx.value() : -1);
           if(aidx.has_value())
             settings::settingsData.content.settings.gatewayNodePowerPolicy
               = aidx.value();
@@ -1383,7 +1384,7 @@ interval:
       - lambda: |-
           //Monitor card available.
           if(!id(card_available)) {
-            ESP_LOGI("SD", "Trying to mount card...");
+            ESP_LOGD("SD", "Trying to mount card...");
             id(card_available) = SD.begin(5);
             if(!id(card_available)) {
               ESP_LOGW("SD", "Unable to mount SD card.");
@@ -1700,25 +1701,25 @@ script:
             case 0: // Child node will be disabled when this Node UPS is offline.
               if(getProblem(Problems::AC_LINE) != ProblemState::NONE) {
                 id(power_control_pin).turn_off();
-                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Node UPS is offline).");
+                ESP_LOGD("Gateway Control", "Nested node is switched OFF (Node UPS is offline).");
               } else {
                 id(power_control_pin).turn_on();
-                ESP_LOGI("Gateway Control", "Nested node is switched ON (Node UPS is online).");
+                ESP_LOGD("Gateway Control", "Nested node is switched ON (Node UPS is online).");
               };
               break;
             case 1: // Child node will be disabled when whole home is off the grid.
               if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE) {
                 id(power_control_pin).turn_off();
-                ESP_LOGI("Gateway Control", "Nested node is switched OFF (Generic Power Failure).");
+                ESP_LOGD("Gateway Control", "Nested node is switched OFF (Generic Power Failure).");
               } else {
                 id(power_control_pin).turn_on();
-                ESP_LOGI("Gateway Control", "Nested node is switched ON (Generic Power Failure fixed).");
+                ESP_LOGD("Gateway Control", "Nested node is switched ON (Generic Power Failure fixed).");
               };
               break;
             case 2: // Child node will be always disabled
             default:
               id(power_control_pin).turn_off();
-              ESP_LOGI("Gateway Control", "Nested node is switched OFF (Manual Control).");
+              ESP_LOGD("Gateway Control", "Nested node is switched OFF (Manual Control).");
               break;
           }
 
