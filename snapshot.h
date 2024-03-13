@@ -240,11 +240,6 @@ std::string generateTelegramBotSummary_1(const char *source_name,
     double totalConsumption =
         snapData.content.dataset.dailyData.energyConsumption +
         snapData.content.dataset.totalPrevDaysData.energyConsumption;
-    int power_loss_minutes = static_cast<int>(
-        snapData.content.dataset.dailyData.powerFailuresDuration / 60);
-    int power_loss_seconds =
-        snapData.content.dataset.dailyData.powerFailuresDuration -
-        power_loss_minutes * 60;
     auto str_len = snprintf(
         buffer, sizeof(buffer), TG_SUMMARY_FORMAT_PART_1, source_name,
         snapData.content.dataset.dailyData.energyConsumption, totalConsumption,
@@ -264,25 +259,30 @@ std::string generateTelegramBotSummary_2(const char *source_name,
 {
 
     char buffer[512];
-    double totalConsumption =
-        snapData.content.dataset.dailyData.energyConsumption +
-        snapData.content.dataset.totalPrevDaysData.energyConsumption;
-    int power_loss_minutes = 0;
-    int power_loss_seconds = 0;
-    if ((timestamp != 0) && (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE))
-    {
-        power_loss_minutes = static_cast<int>((timestamp - snapData.content.dataset.activePowerFailureShiftingStartTS) / 60);
-        power_loss_seconds = (timestamp - snapData.content.dataset.activePowerFailureShiftingStartTS) -
-                             power_loss_minutes * 60;
-    }
-    else
-    {
-        power_loss_minutes = static_cast<int>(
-            snapData.content.dataset.dailyData.powerFailuresDuration / 60);
-        power_loss_seconds =
-            snapData.content.dataset.dailyData.powerFailuresDuration -
-            power_loss_minutes * 60;
-    }
+    double total_power_loss_duration = 0;
+    if(timestamp != 0) {
+        switch (problems[GENERIC_POWER_FAILURE])
+        {
+        case ProblemState::WARNING:
+            total_power_loss_duration = 0;
+            ESP_LOGW(TAG_SNAPSHOT, "Need more time to initialize data.");
+            break;
+        case ProblemState::FAILURE:
+            total_power_loss_duration = timestamp - snapData.content.dataset.activePowerFailureShiftingStartTS +
+                snapData.content.dataset.dailyData.powerFailuresDuration;
+            ESP_LOGW(TAG_SNAPSHOT, "Active power failure detected. Total power loss duration is %.2f second(s).", 
+                total_power_loss_duration);
+            break;
+        default:
+            total_power_loss_duration = snapData.content.dataset.dailyData.powerFailuresDuration;
+            break;
+        }
+    } else {
+        total_power_loss_duration = snapData.content.dataset.dailyData.powerFailuresDuration;
+    };
+
+    auto power_loss_minutes = floor(total_power_loss_duration / 60.0);
+    auto power_loss_seconds = total_power_loss_duration - (power_loss_minutes * 60.0);
     auto str_len = snprintf(
         buffer, sizeof(buffer), TG_SUMMARY_FORMAT_PART_2, source_name,
         snapData.content.dataset.dailyData.powerFailuresCount, power_loss_minutes,
@@ -490,17 +490,17 @@ void commitDailyData(double currentConsumption, int currentTimestamp)
     snapData.content.dataset.dailyData.minVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.dailyData.undervoltageFailures = 0;
     snapData.content.dataset.dailyData.undervoltageWarnings = 0;
-    snapData.content.dataset.dailyData.maxVoltage = 0;
+    snapData.content.dataset.dailyData.maxVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.dailyData.overvoltageFailures = 0;
     snapData.content.dataset.dailyData.overvoltageWarnings = 0;
     snapData.content.dataset.dailyData.minCurrent = SUPPORTED_LOAD_LEVEL;
-    snapData.content.dataset.dailyData.maxCurrent = 0;
+    snapData.content.dataset.dailyData.maxCurrent = SUPPORTED_LOAD_LEVEL;
     snapData.content.dataset.dailyData.overloadFailures = 0;
     snapData.content.dataset.dailyData.overloadWarnings = 0;
     snapData.content.dataset.dailyData.phaseImbalanceFailures = 0;
     snapData.content.dataset.dailyData.phaseImbalanceWarnings = 0;
     snapData.content.dataset.dailyData.minFrequency = FREQUENCY;
-    snapData.content.dataset.dailyData.maxFrequency = 0;
+    snapData.content.dataset.dailyData.maxFrequency = FREQUENCY;
     snapData.content.dataset.dailyData.frequencyFailures = 0;
     snapData.content.dataset.dailyData.frequencyWarnings = 0;
     snapData.content.dataset.dailyData.breakerFailures = 0;
@@ -519,11 +519,11 @@ void clearSnapshotData(time_t timestamp = 0)
     snapData.content.dataset.totalPrevDaysData.energyConsumption = 0;
     snapData.content.dataset.totalPrevDaysData.frequencyFailures = 0;
     snapData.content.dataset.totalPrevDaysData.frequencyWarnings = 0;
-    snapData.content.dataset.totalPrevDaysData.maxCurrent = 0;
+    snapData.content.dataset.totalPrevDaysData.maxCurrent = SUPPORTED_LOAD_LEVEL;
     snapData.content.dataset.totalPrevDaysData.minCurrent = SUPPORTED_LOAD_LEVEL;
-    snapData.content.dataset.totalPrevDaysData.maxFrequency = 0;
+    snapData.content.dataset.totalPrevDaysData.maxFrequency = FREQUENCY;
     snapData.content.dataset.totalPrevDaysData.minFrequency = FREQUENCY;
-    snapData.content.dataset.totalPrevDaysData.maxVoltage = 0;
+    snapData.content.dataset.totalPrevDaysData.maxVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.totalPrevDaysData.minVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.totalPrevDaysData.overheatingFailures = 0;
     snapData.content.dataset.totalPrevDaysData.overheatingWarnings = 0;
@@ -543,11 +543,11 @@ void clearSnapshotData(time_t timestamp = 0)
     snapData.content.dataset.dailyData.energyConsumption = 0;
     snapData.content.dataset.dailyData.frequencyFailures = 0;
     snapData.content.dataset.dailyData.frequencyWarnings = 0;
-    snapData.content.dataset.dailyData.maxCurrent = 0;
+    snapData.content.dataset.dailyData.maxCurrent = SUPPORTED_LOAD_LEVEL;
     snapData.content.dataset.dailyData.minCurrent = SUPPORTED_LOAD_LEVEL;
-    snapData.content.dataset.dailyData.maxFrequency = 0;
+    snapData.content.dataset.dailyData.maxFrequency = FREQUENCY;
     snapData.content.dataset.dailyData.minFrequency = FREQUENCY;
-    snapData.content.dataset.dailyData.maxVoltage = 0;
+    snapData.content.dataset.dailyData.maxVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.dailyData.minVoltage = VOLTAGE_LEVEL;
     snapData.content.dataset.dailyData.overheatingFailures = 0;
     snapData.content.dataset.dailyData.overheatingWarnings = 0;

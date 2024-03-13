@@ -23,7 +23,7 @@ esphome:
   comment: Energy Control
   project:
     name: "vks.control_energy"
-    version: "1.0"
+    version: "1.1"
   libraries:
     - SPI
     - FS
@@ -51,6 +51,10 @@ esphome:
           then:
             - deep_sleep.prevent: dsleep
       - lambda: |-
+          //Set Generic Power Failure to warning (undefined state) until connection to MODBUS sensor is stabilized or failed.
+          setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::WARNING);
+          ESP_LOGI("Energy Meter", "Is module offline? %s", YESNO(id(main_energy_meter).get_module_offline()));
+
           id(card_available) = SD.begin(5);
 
           if(!id(card_available)) {
@@ -73,6 +77,7 @@ esphome:
             };
             loadFromSnapshot(counter);
           };
+
           
           add_on_failure_callback([](Problems problem) { 
             id(process_problem).execute(
@@ -95,7 +100,11 @@ esphome:
           } else {
             sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Node has been started.");
           }
-          id(is_loaded) = true;
+      - delay: 2s
+      - wait_until:
+          condition:
+            lambda: return id(rtc_clock).now().is_valid();
+      - lambda: id(is_loaded) = true;
   on_shutdown:
     priority: 400
     then:
@@ -200,7 +209,7 @@ api:
                   message.c_str(),
                   false
                 );
-                message = generateTelegramBotSummary_2("${energy_source_name} - Test", "${ha_url}", "${grafana_url}");
+                message = generateTelegramBotSummary_2("${energy_source_name} - Test", "${ha_url}", "${grafana_url}", id(rtc_clock).now().timestamp);
                 ESP_LOGD("Telegram", message.c_str());
                 id(tg_bot_publish).execute(
                   message.c_str(),
@@ -280,6 +289,18 @@ api:
               sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_INFO, LOG_CATEGORY_NODE, "Snapshot data has been cleared.");
             } else {
               sdcard::writeLogfile(id(rtc_clock).utcnow(), LOG_EVENT_TYPE_FAIL, LOG_CATEGORY_NODE, "Authentification Failed - invalid pincode provided.");
+            }
+    - service: log_problem_state
+      then:
+        - lambda: |-
+            ESP_LOGI("Problems", "Current state of problems detected by node:");
+            for(int i = 0; i < PROBLEMS_COUNT; i++) {
+              auto state = PROBLEMS_NAMES.at(static_cast<Problems>(i));
+              ESP_LOGI("Problems", "%s: %d (%d) - Need attention: %s", 
+                state, 
+                getProblem(i), 
+                problems[i], 
+                YESNO(getProblem(i) != ProblemState::NONE));
             }
 
 mqtt:
@@ -530,6 +551,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
@@ -545,6 +568,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
@@ -560,6 +585,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: template
     id: em_x_voltage
@@ -636,6 +663,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
@@ -651,6 +680,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
@@ -666,6 +697,8 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            if(!id(is_loaded))
+              return;
             monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: template
     id: em_x_current_avg
@@ -1014,11 +1047,14 @@ binary_sensor:
     id: power_input_presence
     icon: mdi:transmission-tower-import
     lambda: |-
+      if(!id(is_loaded))
+        return {};
       return !id(main_energy_meter).get_module_offline();
     on_state:
       then:
         - lambda: |-
-            monitorPowerFailure(x);
+            if(id(is_loaded))
+              monitorPowerFailure(x);
   - platform: gpio
     pin: GPIO35
     name: "Power Protection Failure"

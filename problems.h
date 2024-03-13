@@ -162,6 +162,14 @@ ProblemState getProblem(Problems problem)
   return problems[static_cast<int>(problem)];
 };
 
+/// @brief Gets state of specified problem
+/// @param problem id to get
+/// @return A state of problem
+ProblemState getProblem(int i)
+{
+  return getProblem(static_cast<Problems>(i));
+};
+
 /// @brief Resets daily counters for problems
 void resetCounters()
 {
@@ -171,10 +179,32 @@ void resetCounters()
     dailyFailures[i] = 0;
   };
   dailyPowerFailureDuration = 0;
+  minVoltage = VOLTAGE_LEVEL;
+  maxVoltage = VOLTAGE_LEVEL;
+  minCurrent = SUPPORTED_LOAD_LEVEL;
+  maxCurrent = SUPPORTED_LOAD_LEVEL;
+  minFrequency = FREQUENCY;
+  maxFrequency = FREQUENCY;
 };
 
 void monitorVoltage(double phaseA, double phaseB, double phaseC)
 {
+  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  {
+    // Nothing to do when powered off.
+    return;
+  }
+
+  bool is_finite = isfinite(phaseA) &&
+                   isfinite(phaseB) &&
+                   isfinite(phaseC) && 
+                   phaseA >= 0 &&
+                   phaseB >= 0 &&
+                   phaseC >= 0;
+
+  if(!is_finite)
+    return;                   
+
   minVoltage = min(phaseA, min(phaseB, phaseC));
   maxVoltage = max(phaseA, max(phaseB, phaseC));
   if (maxVoltage >=
@@ -210,6 +240,12 @@ void monitorVoltage(double phaseA, double phaseB, double phaseC)
 
 void monitorPhaseShift(double value)
 {
+  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  {
+    // Nothing to do when powered off.
+    return;
+  }
+
   auto shift_abs = abs(value);
   if (shift_abs >=
       settings::settingsData.content.settings.phaseShiftFailureLevel)
@@ -229,6 +265,23 @@ void monitorPhaseShift(double value)
 
 void monitorCurrent(double phaseA, double phaseB, double phaseC)
 {
+
+  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  {
+    // Nothing to do when powered off.
+    return;
+  }
+
+  bool is_finite = isfinite(phaseA) &&
+                   isfinite(phaseB) &&
+                   isfinite(phaseC) && 
+                   phaseA >= 0 &&
+                   phaseB >= 0 &&
+                   phaseC >= 0;
+
+  if(!is_finite)
+    return;                   
+
   maxCurrent = max(phaseA, max(phaseB, phaseC));
   minCurrent = min(phaseA, min(phaseB, phaseC));
   auto avgCurrent = (phaseA + phaseB + phaseC) / 3;
@@ -255,6 +308,16 @@ void monitorCurrent(double phaseA, double phaseB, double phaseC)
 
 void monitorFrequencyShift(double value)
 {
+
+  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  {
+    // Nothing to do when powered off.
+    return;
+  }
+
+  if((!isfinite(value)) || (value < 0))
+    return;                   
+
   minFrequency = min(minFrequency, value);
   maxFrequency = max(maxFrequency, value);
   auto freq_delta = abs(value - FREQUENCY);
@@ -324,6 +387,9 @@ void monitorACLineFailure(bool isOk)
 
 void monitorOverheating(double temperature)
 {
+  if(!isfinite(temperature))
+    return;
+
   if (temperature >= OVERHEATING_FAILURE_TEMPERATURE)
   {
     setProblem(Problems::OVERHEAT, ProblemState::FAILURE);

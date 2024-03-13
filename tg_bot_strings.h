@@ -39,7 +39,7 @@ EMOJI_LIGHTNING "<b>%s</b>" EMOJI_LIGHTNING "\n" \
 #define TG_SUMMARY_FORMAT_PART_2 EMOJI_LEDGER " -- Daily Summary [2/3] -- " EMOJI_LEDGER "\n" \
 EMOJI_LIGHTNING "<b>%s</b>" EMOJI_LIGHTNING "\n" \
 "<i>Quality of service:</i>\n" \
-"<blockquote>Stability: %d power failures detected with total duration %d minute(s) %d second(s)\n" \
+"<blockquote>Stability: %d power failures detected with total duration %.0f minute(s) %.0f second(s)\n" \
 "Voltage: %.2f V - %.2f V\n" \
 "Frequency: %.2f Hz - %.2f Hz</blockquote>" 
 
