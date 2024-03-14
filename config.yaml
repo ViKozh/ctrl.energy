@@ -51,6 +51,8 @@ esphome:
           then:
             - deep_sleep.prevent: dsleep
       - lambda: |-
+          setupProblems();
+
           //Set Generic Power Failure to warning (undefined state) until connection to MODBUS sensor is stabilized or failed.
           setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::WARNING);
           ESP_LOGI("Energy Meter", "Is module offline? %s", YESNO(id(main_energy_meter).get_module_offline()));
@@ -71,12 +73,13 @@ esphome:
           
 
           auto counter = id(em_x_total_counter).state;
-          if(counter != NAN) {
-            for(int i = 0; i < sizeof(snapData.data); i++) {
-              snapData.data[i] = id(snapshot_data)[i];
-            };
-            loadFromSnapshot(counter);
+          for(int i = 0; i < sizeof(snapData.data); i++) {
+            snapData.data[i] = id(snapshot_data)[i];
           };
+          if(!isfinite(counter)) {
+            ESP_LOGW("Counter", "Power meter consumption counter data is unavailable. Maybe counter is offline?");
+          }
+          loadFromSnapshot(counter);
 
           
           add_on_failure_callback([](Problems problem) { 
@@ -104,7 +107,9 @@ esphome:
       - wait_until:
           condition:
             lambda: return id(rtc_clock).now().is_valid();
-      - lambda: id(is_loaded) = true;
+      - lambda: |-
+          id(is_loaded) = true;
+          startMonitoring();
   on_shutdown:
     priority: 400
     then:
@@ -113,6 +118,8 @@ esphome:
             ESP_LOGE("Node", "Invalid system state. Shutdown is initialized before node has been loaded.");
             return;
           };
+
+          stopMonitoring();
 
           if(!id(card_available)) {
             ESP_LOGW("SD", "Unable to mount SD card.");
@@ -302,6 +309,13 @@ api:
                 problems[i], 
                 YESNO(getProblem(i) != ProblemState::NONE));
             }
+    - service: alarm_lights
+      variables:
+        mode: int
+        duration: int
+      then:
+        - lambda: |-
+            id(light_control).execute(mode, duration);
 
 mqtt:
   broker: !secret mqtt_broker
@@ -465,6 +479,12 @@ sensor:
     address: 0x0046
     icon: mdi:sine-wave
     id: line_x_freq
+    on_value:
+      - lambda: |-
+          if(!id(is_loaded))
+            return;
+          if(id(power_input_presence).state == true)
+            monitorFrequencyShift(x);
 
   - platform: total_daily_energy
     name: "Energy Consumed Per Day"
@@ -553,7 +573,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+            if(id(power_input_presence).state == true)
+              monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
     name: "Voltage (Phase B)"
@@ -570,7 +591,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+            if(id(power_input_presence).state == true)
+              monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
     name: "Voltage (Phase C)"
@@ -587,7 +609,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
+            if(id(power_input_presence).state == true)
+              monitorVoltage(id(em_a_voltage).state, id(em_b_voltage).state, id(em_c_voltage).state);
   - platform: template
     id: em_x_voltage
     name: "Average Voltage (L-N)"
@@ -665,7 +688,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+            if(id(power_input_presence).state == true)
+              monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
     name: "Current (Phase B)"
@@ -682,7 +706,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+            if(id(power_input_presence).state == true)
+              monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: modbus_controller
     modbus_controller_id: main_energy_meter
     name: "Current (Phase C)"
@@ -699,7 +724,8 @@ sensor:
         - lambda: |-
             if(!id(is_loaded))
               return;
-            monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
+            if(id(power_input_presence).state == true)
+              monitorCurrent(id(em_a_current).state, id(em_b_current).state, id(em_c_current).state);
   - platform: template
     id: em_x_current_avg
     name: "Average Current Per Phase"
@@ -1008,6 +1034,8 @@ text_sensor:
     id: em_x_load_balance_state
     update_interval: 1s
     lambda: |-
+      if(id(power_input_presence).state != true)
+        return {"N/A"};
       if(getProblem(Problems::PHASE_SHIFT) == ProblemState::FAILURE) {
         return {"CRITICAL"};
       } else if (getProblem(Problems::PHASE_SHIFT) == ProblemState::WARNING) {
@@ -1046,6 +1074,9 @@ binary_sensor:
     device_class: connectivity
     id: power_input_presence
     icon: mdi:transmission-tower-import
+    filters:
+      - delayed_on: 1s
+      - delayed_off: 1s
     lambda: |-
       if(!id(is_loaded))
         return {};
@@ -1054,7 +1085,7 @@ binary_sensor:
       then:
         - lambda: |-
             if(id(is_loaded))
-              monitorPowerFailure(x);
+              monitorPowerFailure(x, id(rtc_clock).now().timestamp);
   - platform: gpio
     pin: GPIO35
     name: "Power Protection Failure"
@@ -1543,7 +1574,7 @@ script:
               break;
             case Problems::GENERIC_POWER_FAILURE:
               if(problem_state != ProblemState::NONE) {
-                id(power_fail).execute();
+                id(power_fail).execute();               
               } else {
                 id(power_restore).execute();
               };
@@ -1674,6 +1705,10 @@ script:
             - lambda: return !id(disable_deep_sleep);
           then:
             - deep_sleep.allow: dsleep
+      - script.execute:
+          id: light_control
+          mode: 2
+          duration: 10
 
   - id: power_restore
     mode: single
@@ -1688,6 +1723,10 @@ script:
       - mqtt.publish:
           topic: Infra/Energy/Sources/${energy_source_name}/Active
           payload: "false"
+      - script.execute:
+          id: light_control
+          mode: 3
+          duration: 10
 
   - id: power_monitor
     mode: queued
@@ -1790,3 +1829,41 @@ script:
             false
           );
 
+  - id: light_control
+    mode: queued
+    parameters:
+      mode: int
+      duration: int
+    then:
+      - lambda: |-
+          LightCall call{nullptr};
+          switch(mode) {
+            case 1: //Just plain light without any effect.
+              id(light_signal).turn_on();
+              break;
+            case 2: //Alert effect
+              call = id(light_signal).turn_on();
+              call.set_effect("alert");
+              call.perform();
+              break;
+            case 3: //Warning effect
+              call = id(light_signal).turn_on();
+              call.set_effect("warning");
+              call.perform();
+              break;
+            case 4: //Slow warning effect
+              call = id(light_signal).turn_on();
+              call.set_effect("slow_warn");
+              call.perform();
+              break;
+            case 0:
+            default:
+              id(light_signal).turn_off();
+              break;
+          }
+      - if:
+          condition:
+            lambda: return duration > 0;
+          then:
+            - delay: !lambda return duration * 1000;
+            - light.turn_off: light_signal

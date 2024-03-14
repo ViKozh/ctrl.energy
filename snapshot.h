@@ -334,9 +334,14 @@ std::string generateTelegramBotSummary_3(const char *source_name,
 
 void saveToSnapshot(double currentConsumption)
 {
-    snapData.content.dataset.dailyData.energyConsumption =
-        currentConsumption -
-        snapData.content.dataset.totalPrevDaysData.energyConsumption;
+    if(isfinite(currentConsumption))
+    {
+        snapData.content.dataset.dailyData.energyConsumption =
+            currentConsumption -
+            snapData.content.dataset.totalPrevDaysData.energyConsumption;
+    } else {
+        snapData.content.dataset.dailyData.energyConsumption = NAN;
+    };
     snapData.content.dataset.activePowerFailureShiftingStartTS =
         powerFailureShiftingStartTS;
     snapData.content.dataset.lastPowerFailureDuration =
@@ -401,8 +406,12 @@ void loadFromSnapshot(double currentConsumption)
     {
         ESP_LOGW(TAG_SNAPSHOT, "Invalid CRC of stored data.");
     }
-    // snapData.content.dataset.dailyData.energyConsumption = currentConsumption -
-    //     snapData.content.dataset.totalPrevDaysData.energyConsumption;
+    if(isfinite(currentConsumption)) {
+        snapData.content.dataset.dailyData.energyConsumption = currentConsumption -
+            snapData.content.dataset.totalPrevDaysData.energyConsumption;
+    } else {
+        snapData.content.dataset.dailyData.energyConsumption = NAN;
+    }
     dailyFailures[Problems::GENERIC_POWER_FAILURE] =
         snapData.content.dataset.dailyData.powerFailuresCount;
     dailyPowerFailureDuration =

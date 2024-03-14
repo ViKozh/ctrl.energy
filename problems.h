@@ -104,16 +104,20 @@ static int powerFailureShiftingStartTS = 0;
 // Stores start of power failure event or midnight if powerfailure duration
 // moves over it.
 static int powerFailureStartTS = 0;
-
 static int powerFailureEndTS = 0;
 static int dailyPowerFailureDuration = 0;
+
+static bool isActive;
 
 /// @brief Sets the problem state and updates daily counters for it.
 /// @param problem id to report
 /// @param state A state of problem to set
 void setProblem(Problems problem, ProblemState state = ProblemState::NONE,
-                esphome::ESPTime time = NONE_TIME)
+                int timestamp = 0)
 {
+  if (!isActive)
+    return;
+
   int idx = static_cast<int>(problem);
   auto prev_ = problems[idx];
   if (prev_ == state)
@@ -123,28 +127,31 @@ void setProblem(Problems problem, ProblemState state = ProblemState::NONE,
   {
   case ProblemState::WARNING:
     dailyWarnings[idx] = dailyWarnings[idx] + 1;
+    // if (prev_ != ProblemState::UNKNOWN)
     problem_warning_callback.call(problem);
     break;
   case ProblemState::FAILURE:
     dailyFailures[idx] = dailyFailures[idx] + 1;
-    if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid())
+    if (problem == Problems::GENERIC_POWER_FAILURE && (timestamp != 0))
     {
-      powerFailureShiftingStartTS = time.timestamp;
-      powerFailureStartTS = time.timestamp;
+      powerFailureShiftingStartTS = timestamp;
+      powerFailureStartTS = timestamp;
       lastPowerFailureDuration = -1;
       powerFailureEndTS = 0;
     };
+    // if (prev_ != ProblemState::UNKNOWN)
     problem_failure_callback.call(problem);
     break;
   case ProblemState::NONE:
-    if (problem == Problems::GENERIC_POWER_FAILURE && time.is_valid() &&
+    if (problem == Problems::GENERIC_POWER_FAILURE && (timestamp != 0) &&
         powerFailureStartTS != 0)
     {
-      powerFailureEndTS = time.timestamp;
+      powerFailureEndTS = timestamp;
       lastPowerFailureDuration = powerFailureEndTS - powerFailureShiftingStartTS;
       dailyPowerFailureDuration +=
           static_cast<int>((powerFailureEndTS - powerFailureStartTS));
     }
+    // if (prev_ != ProblemState::UNKNOWN)
     problem_restore_callback.call(problem);
     break;
   default:
@@ -170,6 +177,34 @@ ProblemState getProblem(int i)
   return getProblem(static_cast<Problems>(i));
 };
 
+void startMonitoring()
+{
+  isActive = true;
+}
+
+void stopMonitoring()
+{
+  isActive = false;
+}
+
+void setupProblems()
+{
+  isActive = false;
+  for (int i = 0; i < PROBLEMS_COUNT; i++)
+  {
+    problems[i] = ProblemState::NONE;
+    dailyFailures[i] = 0;
+    dailyWarnings[i] = 0;
+  };
+  dailyPowerFailureDuration = 0;
+  minVoltage = VOLTAGE_LEVEL;
+  maxVoltage = VOLTAGE_LEVEL;
+  minCurrent = SUPPORTED_LOAD_LEVEL;
+  maxCurrent = SUPPORTED_LOAD_LEVEL;
+  minFrequency = FREQUENCY;
+  maxFrequency = FREQUENCY;
+};
+
 /// @brief Resets daily counters for problems
 void resetCounters()
 {
@@ -189,7 +224,10 @@ void resetCounters()
 
 void monitorVoltage(double phaseA, double phaseB, double phaseC)
 {
-  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  if (!isActive)
+    return;
+
+  if (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
   {
     // Nothing to do when powered off.
     return;
@@ -197,13 +235,13 @@ void monitorVoltage(double phaseA, double phaseB, double phaseC)
 
   bool is_finite = isfinite(phaseA) &&
                    isfinite(phaseB) &&
-                   isfinite(phaseC) && 
+                   isfinite(phaseC) &&
                    phaseA >= 0 &&
                    phaseB >= 0 &&
                    phaseC >= 0;
 
-  if(!is_finite)
-    return;                   
+  if (!is_finite)
+    return;
 
   minVoltage = min(phaseA, min(phaseB, phaseC));
   maxVoltage = max(phaseA, max(phaseB, phaseC));
@@ -240,7 +278,10 @@ void monitorVoltage(double phaseA, double phaseB, double phaseC)
 
 void monitorPhaseShift(double value)
 {
-  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  if (!isActive)
+    return;
+
+  if (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
   {
     // Nothing to do when powered off.
     return;
@@ -265,8 +306,10 @@ void monitorPhaseShift(double value)
 
 void monitorCurrent(double phaseA, double phaseB, double phaseC)
 {
+  if (!isActive)
+    return;
 
-  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  if (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
   {
     // Nothing to do when powered off.
     return;
@@ -274,13 +317,13 @@ void monitorCurrent(double phaseA, double phaseB, double phaseC)
 
   bool is_finite = isfinite(phaseA) &&
                    isfinite(phaseB) &&
-                   isfinite(phaseC) && 
+                   isfinite(phaseC) &&
                    phaseA >= 0 &&
                    phaseB >= 0 &&
                    phaseC >= 0;
 
-  if(!is_finite)
-    return;                   
+  if (!is_finite)
+    return;
 
   maxCurrent = max(phaseA, max(phaseB, phaseC));
   minCurrent = min(phaseA, min(phaseB, phaseC));
@@ -308,15 +351,17 @@ void monitorCurrent(double phaseA, double phaseB, double phaseC)
 
 void monitorFrequencyShift(double value)
 {
+  if (!isActive)
+    return;
 
-  if(getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
+  if (getProblem(Problems::GENERIC_POWER_FAILURE) != ProblemState::NONE)
   {
     // Nothing to do when powered off.
     return;
   }
 
-  if((!isfinite(value)) || (value < 0))
-    return;                   
+  if ((!isfinite(value)) || (value < 0))
+    return;
 
   minFrequency = min(minFrequency, value);
   maxFrequency = max(maxFrequency, value);
@@ -339,6 +384,9 @@ void monitorFrequencyShift(double value)
 
 void monitorBreaker(bool isOk)
 {
+  if (!isActive)
+    return;
+
   if (!isOk)
     setProblem(Problems::BREAKER, ProblemState::FAILURE);
   else
@@ -347,22 +395,31 @@ void monitorBreaker(bool isOk)
 
 void monitorPowerMeter(bool isOk)
 {
+  if (!isActive)
+    return;
+
   if (!isOk)
     setProblem(Problems::POWER_METER, ProblemState::FAILURE);
   else
     setProblem(Problems::POWER_METER, ProblemState::NONE);
 };
 
-void monitorPowerFailure(bool isPoweredOn)
+void monitorPowerFailure(bool isPoweredOn, int timestamp = 0)
 {
+  if (!isActive)
+    return;
+
   if (!isPoweredOn)
-    setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::FAILURE);
+    setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::FAILURE, timestamp);
   else
-    setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::NONE);
+    setProblem(Problems::GENERIC_POWER_FAILURE, ProblemState::NONE, timestamp);
 };
 
 void monitorCaseIntrusion(bool isOpened)
 {
+  if (!isActive)
+    return;
+
   if (isOpened)
     setProblem(Problems::INTRUSION, ProblemState::FAILURE);
   else
@@ -371,6 +428,9 @@ void monitorCaseIntrusion(bool isOpened)
 
 void monitorBatteryFailure(bool isOk)
 {
+  if (!isActive)
+    return;
+
   if (!isOk)
     setProblem(Problems::BATTERY, ProblemState::FAILURE);
   else
@@ -379,6 +439,9 @@ void monitorBatteryFailure(bool isOk)
 
 void monitorACLineFailure(bool isOk)
 {
+  if (!isActive)
+    return;
+
   if (!isOk)
     setProblem(Problems::AC_LINE, ProblemState::FAILURE);
   else
@@ -387,7 +450,10 @@ void monitorACLineFailure(bool isOk)
 
 void monitorOverheating(double temperature)
 {
-  if(!isfinite(temperature))
+  if (!isActive)
+    return;
+
+  if (!isfinite(temperature))
     return;
 
   if (temperature >= OVERHEATING_FAILURE_TEMPERATURE)
